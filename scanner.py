@@ -5,7 +5,7 @@ import os
 #SETUP
 file_paths = []
 with open('exclude_list.txt', 'r') as f:
-    exclude_list = f.read().splitlines("\n")
+    exclude_list = f.read().splitlines()
 
 files_scanned = 0
 bytes_scanned = 0
@@ -36,16 +36,21 @@ def scan_directory(directory):
     # Recursively scan the directory and its subdirectories, as well as counting the number of files and bytes scanned
     file_paths = []
     for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(root, d)) not in exclude_list or d.startswith('.')]  # Exclude hidden directories or directories (even nested ones) in the exclude list
         for file in files:
+
+            if file.startswith('.'):  # Skip hidden files
+                continue
+
+            file_path = os.path.normpath(os.path.join(root, file))
+            if file_path in exclude_list or any(file_path.startswith(ex + os.sep) for ex in exclude_list): # Exclude exact files in the exclude list, and any files in excluded directories
+                continue
+
             file_path = os.path.join(root, file)
             file_paths.append(file_path)
             files_scanned += 1
             bytes_scanned += os.path.getsize(file_path)
 
-    # Filter out larger directories, hidden files, and files in the exclude list
-    for file_path in file_paths:
-        if file_path.startswith('.') or file_path in exclude_list:
-            file_paths.remove(file_path)
     return file_paths
 
 #MAIN
