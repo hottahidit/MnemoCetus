@@ -2,8 +2,10 @@
 
 MnemoCetus is a developer workspace power tool designed to scan, analyze, and organize local coding projects. It helps developers understand what exists in their workspace, identify unused files, and gain insights into project structure and storage usage.
 
-### What's in the name?
-MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memory) and the Greek God Anicetus (the Unconquerable One, and son of Heracles). It simultaneously plays on mnēmē (latin for memory) and Cetus, a legendary beast that roamed the deep oceans. Together, MnemoCetus represents an **unconquerable leviathian** that roams the deep sea of files on your system, ensuring it is protected, clean and secure.
+## What's in the name?
+
+MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memory) and the Greek God Anicetus (the Unconquerable One, and son of Heracles). It simultaneously plays on mnēmē (latin for memory) and Cetus, a legendary beast that roamed the deep oceans. Together, MnemoCetus represents an unconquerable leviathian that roams the deep sea of files on your system, ensuring it is protected, clean and secure.
+
 ---
 
 ## Features (Planned / In Progress)
