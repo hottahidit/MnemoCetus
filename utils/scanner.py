@@ -4,8 +4,13 @@ import os
 
 #SETUP
 file_paths = []
-with open('exclude_list.txt', 'r') as f:
-    exclude_list = f.read().splitlines()
+try:
+    with open('./exclude_list/custom_exclude_list.txt', 'r') as f:
+        exclude_list = f.read().splitlines()
+except FileNotFoundError:
+    print("Custom exclude list not found, proceeding without it. (If it exists, name your custom list 'custom_exclude_list.txt' and place it in the 'exclude_list' folder to use it.)")
+    with open('./exclude_list/default_exclude_list.txt', 'r') as f:
+        exclude_list = f.read().splitlines()
 
 files_scanned = 0
 bytes_scanned = 0
@@ -102,7 +107,6 @@ if __name__ == "__main__":
     directory = input("Enter the directory to scan: ")
     scanned_files = scan_directory(directory)
     identified_type = identify_directory_type(directory)
-    print(f"Scanned {files_scanned} files, totaling {bytes_scanned/1073741824:.2f} GB in {directory}, including subdirectories. Detected directory type: {identified_type}.")
-    #                                                              ^ bytes_scanned/1024/1024/1024 to convert bytes into GB
+    print(f"Scanned {files_scanned} files, totaling {bytes_scanned/(1024**3):.2f} GB in {directory}, including subdirectories. Detected directory type: {identified_type}.")
     if input("Do you want to see the list of scanned files? (y/n): ").lower() == 'y':
         print(f"OVERRIDE: \n{scanned_files}")
