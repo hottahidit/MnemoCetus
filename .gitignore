@@ -1,3 +1,6 @@
 PROJECT_OVERVIEW.md
 PLAN.md
 .vscode
+*__pycache__/*
+exclude_list/custom_exclude_list.txt
+tests/
