@@ -19,7 +19,7 @@ o8o        o888o o888o o888o `Y8bod8P' o888o o888o o888o `Y8bod8P'  `Y8bood8P'  
 
 # MnemoCetus
 
-MnemoCetus is a developer workspace power tool designed to scan, analyze, and organize local coding projects. It helps developers understand what exists in their workspace, identify unused files, and gain insights into project structure and storage usage.
+MnemoCetus is a developer workspace power tool designed to scan, analyse, and organise local coding projects. It helps developers understand what exists in their workspace, identify unused files, and gain insights into project structure and storage usage.
 
 ## What's in the name?
 
@@ -94,13 +94,14 @@ Enter the directory to scan: /your/projects
 
 MnemoCetus aims to become a developer workspace assistant that:
 
-* Organizes projects automatically
+* Organises projects automatically
 * Reduces storage clutter
 * Helps developers understand their codebase ecosystem
 * Provides intelligent insights about local development environments
 
 ---
 
-## License
+## LICENSE
 
+I am an (self-proclaimed) intermediate student developer looking to further their skills with this project. Feel free to use my code however you would like!
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
