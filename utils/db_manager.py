@@ -186,7 +186,7 @@ class Database:
 
     def save_dependencies(self, project_id, names, ecosystem=None, replace=True):
         """
-        Store a project's dependency names. By default this REPLACES the project's existing deps so a re-scan reflects what's currently declared (drops removedones). 
+        Store a project's dependency names. By default this REPLACES the project's existing deps so a re-scan reflects what's currently declared (drops removed ones).
         Set replace=False to only add.
 
         Args:
@@ -233,7 +233,7 @@ class Database:
     # -- Reads --------------------------------------------------------------- #
     def get_project(self, path):
         """
-        Pull a single project back out by path, with its deps and frameworksre-inflated. 
+        Pull a single project back out by path, with its deps and frameworks re-inflated.
         Returns None if we've never indexed it.
 
         Args:
