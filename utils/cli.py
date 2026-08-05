@@ -1,4 +1,4 @@
-# Interactive CLI for MnemoCetus (the questionary menu + debug tools).
+# Interactive CLI for MnemoCetus (the interactive questionary menu).
 #
 # This is the human-facing front-end; the engines live in scanner / classifier / cleaner / db_manager.
 # Launch it with 'python utils/scanner.py' (which delegates here) or 'python utils/cli.py' directly.
@@ -8,62 +8,7 @@ from rich import print
 from rich.panel import Panel
 import os
 
-from scanner import (
-    scan_directory, classify_directory, resolve_directory_relationships,
-    persist_scan, describe, _is_recognised,
-    _is_excluded, _default, _human_size,
-)
-
-
-# --- debug / CLI helpers ------------------------------------------------- #
-def _is_child(child, parent):
-    """
-    Checks whether 'child' lives inside 'parent' (i.e. parent is an ancestor of child).
-
-    Args:
-        child (str): the path we think is nested.
-        parent (str): the path we think is the ancestor.
-
-    Returns:
-        bool: True if child sits under parent (and isn't parent itself), else False.
-    """
-    child_abs = os.path.abspath(child)
-    parent_abs = os.path.abspath(parent)
-    if child_abs == parent_abs:
-        return False
-    try:
-        return os.path.commonpath([child_abs, parent_abs]) == parent_abs
-    except ValueError:  # e.g. different drives on Windows -> not related
-        return False
-
-def _nearest_project_ancestor(directory):
-    """Walk up from 'directory' and hand back the closest parent that looks like a project (or None)."""
-    path = os.path.abspath(directory)
-    parent = os.path.dirname(path)
-    while parent and parent != path:
-        if _is_recognised(classify_directory(parent)):
-            return parent
-        path, parent = parent, os.path.dirname(parent)
-    return None
-
-def _directory_facts(directory):
-    """Dumps a bunch of low-level facts about a path, handy when something looks off."""
-    facts = {
-        "input": directory,
-        "abspath": os.path.abspath(directory),
-        "exists": os.path.exists(directory),
-        "is_dir": os.path.isdir(directory),
-        "is_file": os.path.isfile(directory),
-        "readable": os.access(directory, os.R_OK) if os.path.exists(directory) else False,
-        "is_symlink": os.path.islink(directory),
-        "realpath": os.path.realpath(directory),
-    }
-    try:
-        facts["size_bytes"] = os.path.getsize(directory)
-        facts["mtime"] = os.path.getmtime(directory)
-    except OSError:
-        facts["size_bytes"] = facts["mtime"] = None
-    return facts
+from scanner import persist_scan, _human_size
 
 
 def _cli():
@@ -129,34 +74,6 @@ def _cli():
             f"[dim]This lasts until your next scan. Choose 'Save this scan long-term' to keep it; "
             f"all the other features now work on this scan.[/]",
             title="Scan complete", style="green"))
-
-    def do_classify():
-        directory = ask_dir("Directory to classify:")
-        if not directory:
-            return
-        info = classify_directory(directory)
-        print(Panel(describe(info), title="Best guess", style="cyan"))
-        print(info)  # rich pretty-prints the structured dict
-
-    def do_relationships():
-        directory = ask_dir("Directory to scan + map:")
-        if not directory:
-            return
-        mode = ask_mode()
-        if not mode:
-            return
-        rels = resolve_directory_relationships(scan_directory(directory), mode=mode)
-        if not rels:
-            print("No recognised project directories in there.")
-            return
-        for proj, info in rels.items():
-            print(Panel(
-                f"type:     {info['type']}\n"
-                f"role:     {info['role']}\n"
-                f"parent:   {info['parent']}\n"
-                f"children: {len(info['children'])}\n"
-                f"symlink:  {info['is_symlink']}",
-                title=proj, style="cyan"))
 
     def do_save_longterm():
         if session["root"] is None:
@@ -489,81 +406,6 @@ def _cli():
         finally:
             db.close()
 
-    # --- Debug Submenu --------------------------------------------------- #
-    def do_debug():
-        while True:
-            check = questionary.select(
-                "Debug / checks:",
-                choices=[
-                    "Is X a child of Y?",
-                    "Is a path excluded by the filters?",
-                    "Show the compiled exclude rules",
-                    "Is it a recognised project?",
-                    "Nearest project ancestor",
-                    "Symlink info",
-                    "Directory facts (low-level dump)",
-                    "Classify a single directory",
-                    "Resolve relationships (preview, no save)",
-                    "Back",
-                ],
-            ).ask()
-            if check in (None, "Back"):
-                return
-
-            if check == "Is X a child of Y?":
-                child = ask_dir("Child path:")
-                parent = ask_dir("Parent path:")
-                if child and parent:
-                    yes = _is_child(child, parent)
-                    print(f"{'✅' if yes else '❌'} '{child}' is "
-                          f"{'' if yes else 'NOT '}a child of '{parent}'")
-
-            elif check == "Is a path excluded by the filters?":
-                path = questionary.path("Path to test:").ask()
-                if path:
-                    sc = _default()
-                    blocked = _is_excluded(path, sc._name_rules, sc._path_rules)
-                    print(f"{'🚫 excluded' if blocked else '✅ kept'} -> {os.path.normpath(path)}")
-
-            elif check == "Show the compiled exclude rules":
-                sc = _default()
-                name_rules, path_rules = sc._name_rules, sc._path_rules
-                print(Panel(
-                    f"name rules ({len(name_rules)}):\n{sorted(name_rules)}\n\n"
-                    f"path rules ({len(path_rules)}):\n{sorted(path_rules)}",
-                    title="Compiled exclude rules", style="yellow"))
-
-            elif check == "Is it a recognised project?":
-                directory = ask_dir()
-                if directory:
-                    info = classify_directory(directory)
-                    print(f"{'✅ yes' if _is_recognised(info) else '❌ no'} -> {describe(info)}")
-
-            elif check == "Nearest project ancestor":
-                directory = ask_dir()
-                if directory:
-                    anc = _nearest_project_ancestor(directory)
-                    print(f"Nearest project ancestor -> {anc or '(none found)'}")
-
-            elif check == "Symlink info":
-                directory = ask_dir()
-                if directory:
-                    if os.path.islink(directory):
-                        print(f"🔗 symlink -> {os.path.realpath(directory)}")
-                    else:
-                        print("Not a symlink.")
-
-            elif check == "Directory facts (low-level dump)":
-                directory = ask_dir()
-                if directory:
-                    print(_directory_facts(directory))
-
-            elif check == "Classify a single directory":
-                do_classify()
-
-            elif check == "Resolve relationships (preview, no save)":
-                do_relationships()
-
     def do_audit():
         directory = ask_dir("Directory to audit (pip-audit / npm audit):")
         if not directory:
@@ -610,7 +452,6 @@ def _cli():
                 "Dependency vulnerability audit (optional)",
                 "Scan a different directory",
                 "Open a saved database",
-                "Debug / checks",
                 "Quit",
             ],
         ).ask()
@@ -629,8 +470,6 @@ def _cli():
             do_scan()
         elif action == "Open a saved database":
             do_browse(permanent_db)
-        elif action == "Debug / checks":
-            do_debug()
 
 
 #👇  Show this in raw format so "\" will print.                          Do you like the ASCII?
