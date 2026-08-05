@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %} - Projects{% endblock %}
+{% block content %}
+
+  <h2>Projects <span class="muted">({{ projects | length }} of {{ total }})</span></h2>
+
+  <form class="filters" method="get" action="{{ url_for('projects_view') }}">
+    <input type="text" name="q" placeholder="path contains..." value="{{ filters.q }}">
+    <select name="language">
+      <option value="">any language</option>
+      {% for l in languages %}
+        <option value="{{ l }}" {{ 'selected' if l == filters.language else '' }}>{{ l }}</option>
+      {% endfor %}
+    </select>
+    <select name="category">
+      <option value="">any category</option>
+      {% for c in categories %}
+        <option value="{{ c }}" {{ 'selected' if c == filters.category else '' }}>{{ c }}</option>
+      {% endfor %}
+    </select>
+    <select name="framework">
+      <option value="">any framework</option>
+      {% for fw in frameworks %}
+        <option value="{{ fw }}" {{ 'selected' if fw == filters.framework else '' }}>{{ fw }}</option>
+      {% endfor %}
+    </select>
+    <label><input type="checkbox" name="uncertain" value="1"
+                  {{ 'checked' if filters.uncertain else '' }}> uncertain only</label>
+    <button type="submit">Filter</button>
+    <a href="{{ url_for('projects_view') }}">reset</a>
+  </form>
+
+  {% if not projects %}
+    <p class="muted">No projects match.</p>
+  {% else %}
+  <table>
+    <tr>
+      <th>path</th><th>language</th><th>category</th><th>conf.</th>
+      <th>size</th><th>reclaimable</th><th>composition</th><th>recategorise</th>
+    </tr>
+    {% for p in projects %}
+      <tr>
+        <td><code>{{ p.path }}</code></td>
+        <td>{{ p.language }}</td>
+        <td>
+          {{ p.category }}
+          {% if p.user_confirmed %}
+            <span class="tag" title="user-confirmed (auto guess: {{ p.auto.category }})">confirmed</span>
+          {% endif %}
+        </td>
+        <td>{{ '%.2f' | format(p.confidence) }}</td>
+        <td>{{ p.size_bytes | humansize }}</td>
+        <td class="muted">{% if p.reclaimable_bytes %}{{ p.reclaimable_bytes | humansize }}{% else %}&mdash;{% endif %}</td>
+        <td class="muted">
+          {%- for c, s in p.breakdown.categories.items() -%}
+            {{ c }} {{ '%.0f' | format(s * 100) }}%{% if not loop.last %}, {% endif %}
+          {%- endfor -%}
+        </td>
+        <td>
+          <form class="row-form" method="post">
+            <input type="hidden" name="path" value="{{ p.path }}">
+            <input type="hidden" name="next"
+                   value="{{ url_for('projects_view') }}{% if query_string %}?{{ query_string }}{% endif %}">
+            <select name="category">
+              <option value="">&mdash; keep &mdash;</option>
+              {% for c in all_categories %}
+                <option value="{{ c }}" {{ 'selected' if c == p.category else '' }}>{{ c }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="language" placeholder="language" size="8">
+            <input type="text" name="note" placeholder="note" size="12">
+            <button formaction="{{ url_for('override') }}">Save</button>
+            <button formaction="{{ url_for('approve') }}">Approve</button>
+            <button formaction="{{ url_for('clear') }}">Clear</button>
+            <button formaction="{{ url_for('delete') }}"
+                    onclick="return confirm('Delete {{ p.path }} from the database?')">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+{% endblock %}

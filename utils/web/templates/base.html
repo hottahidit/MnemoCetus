@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MnemoCetus{% block title %}{% endblock %}</title>
+  <style>
+    :root { --line:#e5e7eb; --muted:#6b7280; --ink:#1b2430; --accent:#0e7490; --bg:#f9fafb; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; color: var(--ink); }
+    header { padding: 1rem 2rem; border-bottom: 1px solid var(--line); display: flex;
+             align-items: baseline; gap: 1.5rem; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 1.3rem; }
+    nav a { margin-right: 1rem; text-decoration: none; color: var(--accent); font-weight: 600; }
+    nav a:hover { text-decoration: underline; }
+    main { padding: 1.5rem 2rem; }
+    .muted { color: var(--muted); }
+    code { background: #f3f4f6; padding: 0 .3rem; border-radius: 3px; }
+    .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+    .card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1.1rem; min-width: 9rem; }
+    .card .n { font-size: 1.6rem; font-weight: 700; }
+    .card .l { color: var(--muted); font-size: .85rem; }
+    .grid { display: flex; gap: 2rem; flex-wrap: wrap; }
+    table { border-collapse: collapse; margin-top: .4rem; }
+    th, td { border: 1px solid var(--line); padding: .35rem .7rem; text-align: left; vertical-align: top; }
+    th { background: var(--bg); }
+    .bar { height: .5rem; background: var(--accent); border-radius: 3px; display: inline-block; }
+    form.filters { margin: .5rem 0 1rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    form.filters input, form.filters select { padding: .3rem; }
+    .tag { font-size: .72rem; padding: .05rem .4rem; border-radius: 10px; background: #ecfeff;
+           color: var(--accent); border: 1px solid #a5f3fc; }
+    .row-form { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+    .row-form select, .row-form input { padding: .25rem; }
+    button { padding: .25rem .6rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>&#128051; MnemoCetus</h1>
+    <nav>
+      <a href="{{ url_for('index') }}">Dashboard</a>
+      <a href="{{ url_for('projects_view') }}">Projects</a>
+      <a href="{{ url_for('cleanup_view') }}">Cleanup</a>
+      <a href="{{ url_for('overlap_view') }}">Overlap</a>
+    </nav>
+    <span class="muted">database: <code>{{ db_path }}</code></span>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

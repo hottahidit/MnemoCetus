@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %} - Overlap{% endblock %}
+{% block content %}
+
+  <h2>Dependency overlap</h2>
+  <p class="muted">How much of your installed footprint is the <strong>same packages</strong> copied into
+     project after project &mdash; and roughly how much a shared/hardlinked package store
+     (<code>uv</code>, <code>pnpm</code>, or one venv for compatible projects) could reclaim. The savings
+     figure is a coarse estimate from dependency <em>names</em> only; real dedup depends on versions matching.</p>
+
+  {% if not overlap or not overlap.total_instances %}
+    <p class="muted">No dependencies recorded yet. Run a scan over some projects with a manifest
+      (<code>requirements.txt</code>, <code>package.json</code>, &hellip;) first.</p>
+  {% else %}
+    <div class="cards">
+      <div class="card"><div class="n">~{{ overlap.estimated_savings | humansize }}</div><div class="l">est. reclaimable</div></div>
+      <div class="card"><div class="n">{{ (overlap.duplication_ratio * 100) | round(0) | int }}%</div><div class="l">duplicate copies</div></div>
+      <div class="card"><div class="n">{{ overlap.distinct_deps }}</div><div class="l">distinct deps</div></div>
+      <div class="card"><div class="n">{{ overlap.total_instances }}</div><div class="l">installed total</div></div>
+      <div class="card"><div class="n">{{ overlap.env_bytes | humansize }}</div><div class="l">env bloat (venv + node_modules)</div></div>
+    </div>
+
+    <p class="muted">{{ overlap.total_instances }} installed package(s) across your projects, but only
+      <strong>{{ overlap.distinct_deps }}</strong> are distinct &mdash; {{ overlap.duplicate_instances }}
+      are duplicate copies.</p>
+
+    <h3>By ecosystem</h3>
+    <table>
+      <tr><th>ecosystem</th><th>distinct deps</th><th>installed total</th><th>projects</th></tr>
+      {% for eco, v in overlap.by_ecosystem.items() %}
+        <tr><td>{{ eco }}</td><td>{{ v.distinct }}</td><td>{{ v.instances }}</td><td>{{ v.projects }}</td></tr>
+      {% endfor %}
+    </table>
+
+    <h3>Most-shared dependencies</h3>
+    <form class="filters" method="get" action="{{ url_for('overlap_view') }}">
+      <label>shared by at least
+        <input type="number" name="min" min="2" step="1" value="{{ min_projects }}"> project(s)</label>
+      <button type="submit">Apply</button>
+      <a href="{{ url_for('overlap_view') }}">reset</a>
+    </form>
+
+    {% if not overlap.shared %}
+      <p class="muted">No dependency is shared by {{ min_projects }}+ projects. Lower the threshold, or
+        index more projects.</p>
+    {% else %}
+      <table>
+        <tr><th>dependency</th><th>ecosystem</th><th>projects</th><th>used in</th></tr>
+        {% for d in overlap.shared %}
+          <tr>
+            <td><code>{{ d.name }}</code></td>
+            <td>{{ d.ecosystem }}</td>
+            <td>{{ d.project_count }}</td>
+            <td class="muted">{{ d.projects | join(', ') }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  {% endif %}
+
+{% endblock %}

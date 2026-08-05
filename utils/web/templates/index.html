@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %} - Dashboard{% endblock %}
+{% block content %}
+
+  {% if not stats %}
+    <p>No projects yet. Run a scan first:
+       <code>python utils/scanner.py</code> &rarr; &ldquo;Scan + save to database&rdquo;.</p>
+  {% else %}
+    <div class="cards">
+      <div class="card"><div class="n">{{ stats.project_count }}</div><div class="l">projects</div></div>
+      <div class="card"><div class="n">{{ stats.total_bytes | humansize }}</div><div class="l">total size</div></div>
+      <div class="card"><div class="n">{{ stats.total_files }}</div><div class="l">files</div></div>
+      <div class="card"><div class="n">{{ stats.confirmed }}</div><div class="l">user-confirmed</div></div>
+      {% if reclaimable and reclaimable.total_bytes %}
+        <div class="card"><div class="n">{{ reclaimable.total_bytes | humansize }}</div><div class="l">reclaimable</div></div>
+      {% endif %}
+    </div>
+
+    {% if latest_scan %}
+      <p class="muted">latest scan #{{ latest_scan.id }} &mdash;
+        {{ latest_scan.project_count }} projects, {{ latest_scan.file_count }} files,
+        {{ latest_scan.total_bytes | humansize }} &mdash; {{ latest_scan.started_at }}</p>
+    {% endif %}
+
+    <div class="grid">
+      <div>
+        <h2>By language</h2>
+        <table>
+          <tr><th>language</th><th>projects</th><th>size</th></tr>
+          {% for lang, v in stats.by_language.items() %}
+            <tr><td>{{ lang }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+
+      <div>
+        <h2>By category</h2>
+        <table>
+          <tr><th>category</th><th>projects</th><th>size</th></tr>
+          {% for cat, v in stats.by_category.items() %}
+            <tr><td>{{ cat }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+
+      <div>
+        <h2>Confidence</h2>
+        <table>
+          <tr><th>band</th><th>projects</th></tr>
+          {% for band, n in stats.confidence.items() %}
+            <tr><td>{{ band }}</td><td>{{ n }}</td></tr>
+          {% endfor %}
+        </table>
+        {% if stats.confidence['low (<0.6)'] %}
+          <p class="muted"><a href="{{ url_for('projects_view', uncertain='1') }}">Review the
+            {{ stats.confidence['low (<0.6)'] }} low-confidence project(s) &rarr;</a></p>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if reclaimable and reclaimable.total_bytes %}
+    <h2>Reclaimable space <span class="muted">({{ reclaimable.total_bytes | humansize }} of regenerable bloat)</span></h2>
+    <p class="muted">Directories like <code>node_modules</code>, <code>venv</code> and build output &mdash;
+       safe to delete, a tool rebuilds them on demand.
+       <a href="{{ url_for('cleanup_view') }}">View cleanup recommendations &rarr;</a></p>
+    <div class="grid">
+      <div>
+        <h3>By kind</h3>
+        <table>
+          <tr><th>kind</th><th>dirs</th><th>size</th></tr>
+          {% for kind, v in reclaimable.by_kind.items() %}
+            <tr><td>{{ kind }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+      <div>
+        <h3>Heaviest projects</h3>
+        <table>
+          <tr><th>project</th><th>reclaimable</th></tr>
+          {% for p in reclaimable.top_projects %}
+            <tr><td><code>{{ p.path }}</code></td><td>{{ p.reclaimable_bytes | humansize }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+    {% endif %}
+  {% endif %}
+
+{% endblock %}

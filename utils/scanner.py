@@ -1,56 +1,19 @@
-# File scanner for MnemoCetus (v0.2 scanning + v0.3 classification - the "MnemoSort" engine).
+# File scanner for MnemoCetus (v0.2 scanning + v0.4 refactor - the discovery half of "MnemoSort").
 #
-# This is the discovery half of the project;
-# it walks a workspace, filters out the junk (node_modules, venv, build artifacts...), and works out what kind of project each dir is.
+# Walks a workspace and filters out the junk (node_modules, venv, build artifacts...), then hands each candidate dir to the classifier to work out what it is.
 # v0.4 folds the stateful bits (exclude config + classification cache) into a Scanner class; the original module-level functions stay on as thin shims.
+# The recognition engine now lives in classifier.py and the cleanup detection in cleaner.py -> this file is the scanning core plus the Scanner orchestrator.
 
 # IMPORTS
 from rich import print
-from rich.columns import Columns
-from rich.panel import Panel
 import os
-import re
-import json
-try:
-    import tomllib  # Python 3.11+; parses pyproject.toml (and could also parse Cargo.toml)
-except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None
 
-# SETUP
-# The exclude list is loaded lazily by Scanner (see _load_exclude_list) so importing this module does no file I/O.
-PYTHON_SIGNALS = {
-    "django": ("django", "backend"),
-    "flask": ("flask", "backend", "templates"),
-    "fastapi": ("fastapi", "backend"),
-    "torch": ("pytorch", None),
-    "tensorflow": ("tensorflow", None),
-    "scikit-learn": ("scikit-learn", None),
-    "click": ("click", "cli"),
-    "typer": ("typer", "cli"),
-    "ansible": ("ansible", "automation"),
-    "fabric": ("fabric", "automation"),
-    "invoke": ("invoke", "automation"),
-    "celery": ("celery", "automation")
-}
-JS_SIGNALS = {
-    "next": ("next.js", "frontend"),
-    "nuxt": ("nuxt.js", "frontend"),
-    "react": ("react", "frontend"),
-    "vue": ("vue", "frontend"),
-    "svelte": ("svelte", "frontend"),
-    "@angular/core": ("angular", "frontend"),
-    "express": ("express", "backend"),
-    "koa": ("koa", "backend"),
-    "@nestjs/core": ("nestjs", "backend"),
-    "electron": ("electron", "desktop"),
-    "gulp": ("gulp", "automation"),
-    "grunt": ("grunt", "automation")
-}
-CODE_EXTENSIONS = {
-    ".py": "python", ".js": "javascript", ".jsx": "javascript",
-    ".ts": "javascript", ".tsx": "javascript", ".rs": "rust", ".go": "go",
-    ".java": "java", ".rb": "ruby", ".php": "php", ".cs": "c#"
-}
+# The classification engine (Scanner.detect delegates the "what kind of project" work to these).
+from classifier import (
+    PYTHON_SIGNALS, JS_SIGNALS, W_MARKER, W_DEP, W_LAYOUT,
+    _result, _unknown, _census, _recognise, _load_toml,
+    _python_dependencies, _js_dependencies, _go_dependencies,
+)
 
 # FUNCTIONS
 def _load_exclude_list():
@@ -110,41 +73,21 @@ def _is_excluded(path, name_rules, path_rules):
         return True
     return any(norm.startswith(p + os.sep) for p in path_rules)  # anything under an excluded path
 
-## -- DIRECTORY MGMT ---------------------------------------------------------------------- ##
-def _result(language, frameworks, category, markers, confidence, metrics=None, dependencies=None):
-    """Build the canonical classification dict. Always returns a dict (never None)."""
-    return {
-        "language": language,
-        "frameworks": frameworks,
-        "category": category,
-        "markers": markers,
-        "confidence": round(confidence, 2),
-        "metrics": metrics or _empty_metrics(),     # size / file count / dep count
-        "dependencies": sorted(dependencies) if dependencies else []  # declared package names
-    }
-
-def _unknown():
-    return _result(None, [], None, [], 0.0)
-
-def _empty_metrics():
-    return {"file_count": 0, "size_bytes": 0, "dependency_count": 0}
-
-def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, file_paths=None):
+## -- FILE COLLECTION --------------------------------------------------------------------- ##
+def _collect_files(directory, name_rules, path_rules, file_paths=None):
     """
-    Tallies the project's size -> how many files, how many bytes, how many declared deps.
+    One pass over a project's files -> a list of (path, size_bytes), honouring excludes + hidden.
 
     Args:
         directory (str): the project dir we're measuring.
         name_rules (set): basename exclude rules (already compiled by the caller).
         path_rules (set): path exclude rules (already compiled by the caller).
-        dependency_count (int): deps the caller already parsed (so we don't re-read manifests).
-        file_paths (list): optional pre-scanned paths -> if given we just total the ones under `directory` instead of walking the tree again.
+        file_paths (list): optional pre-scanned paths -> if given we just keep the ones under 'directory' instead of walking the tree again.
 
     Returns:
-        dict: {"file_count", "size_bytes", "dependency_count"} (excludes/hidden stuff skipped).
+        list: (path, size_bytes) tuples. Both metrics and the census are derived from this.
     """
-    file_count = 0
-    size_bytes = 0
+    collected = []
 
     if file_paths is not None:
         # Reuse an existing scan -> keep only the paths that sit under this directory.
@@ -153,8 +96,7 @@ def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, fi
             norm = os.path.normpath(p)
             if norm == base or norm.startswith(base + os.sep):
                 try:
-                    size_bytes += os.path.getsize(norm)
-                    file_count += 1
+                    collected.append((norm, os.path.getsize(norm)))
                 except OSError:
                     continue
     else:
@@ -168,119 +110,24 @@ def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, fi
                 if _is_excluded(fp, name_rules, path_rules):
                     continue
                 try:
-                    size_bytes += os.path.getsize(fp)
-                    file_count += 1
+                    collected.append((fp, os.path.getsize(fp)))
                 except OSError:
                     continue
 
-    return {"file_count": file_count, "size_bytes": size_bytes, "dependency_count": dependency_count}
+    return collected
 
+def _metrics(collected, dependency_count=0):
+    """Roll a _collect_files() result up into the metrics dict {file_count, size_bytes, dependency_count}."""
+    return {
+        "file_count": len(collected),
+        "size_bytes": sum(size for _, size in collected),
+        "dependency_count": dependency_count,
+    }
 
-def _safe_read(path, limit=1_000_000):
-    """Read a text file defensively (size-capped)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read(limit)
-    except OSError:
-        return ""
-
-def _load_json(path):
-    try:
-        data = json.loads(_safe_read(path))
-        return data if isinstance(data, dict) else {}
-    except ValueError:  # malformed JSON -> behave as "no data", so we don't crash the scan
-        return {}
-
-def _load_toml(path):
-    if tomllib is None:
-        return {}
-    try:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    except (OSError, ValueError):  # tomllib.TOMLDecodeError subclasses ValueError
-        return {}
-
-def _dep_name(spec):
-    """Reduce a requirement string (e.g. 'Django>=4.0; extra') to its bare package name."""
-    return re.split(r"[<>=!~;[]", spec, maxsplit=1)[0].strip().lower()
+def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, file_paths=None):
+    """Back-compat helper: collect the files and roll them up in one go (see _collect_files / _metrics)."""
+    return _metrics(_collect_files(directory, name_rules, path_rules, file_paths), dependency_count)
 ## ---------------------------------------------------------------------------------------- ##
-
-## -- DEPENDENCIES ------------------------------------------------------------------------ ##
-def _python_dependencies(directory):
-    """Collect declared dependency names from requirements.txt and pyproject.toml."""
-    deps = set()
-    req = os.path.join(directory, "requirements.txt")
-    if os.path.exists(req):
-        for line in _safe_read(req).splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                name = _dep_name(line)
-                if name:
-                    deps.add(name)
-    data = _load_toml(os.path.join(directory, "pyproject.toml"))
-    for spec in data.get("project", {}).get("dependencies", []) or []:
-        deps.add(_dep_name(spec))
-    poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-    for name in (poetry or {}):
-        if name.lower() != "python":
-            deps.add(name.lower())
-    return deps
-
-def _js_dependencies(directory):
-    """Return package.json dict and a set of lowercase dependency names."""
-
-    data = _load_json(os.path.join(directory, "package.json"))
-    names = set()
-    for key in ("dependencies", "devDependencies"):
-        section = data.get(key)
-        if isinstance(section, dict):
-            names.update(k.lower() for k in section)
-    return data, names
-
-def _go_dependencies(directory):
-    """Return required module paths from go.mod (both single 'require x' lines and require (...) blocks)."""
-    deps = []
-    in_block = False
-    for line in _safe_read(os.path.join(directory, "go.mod")).splitlines():
-        line = line.strip()
-        if not line or line.startswith("//"):
-            continue
-        if in_block:
-            if line == ")":
-                in_block = False
-            else:
-                deps.append(line.split()[0])  # "example.com/m v1.2.3" -> "example.com/m"
-        elif line.startswith("require ("):
-            in_block = True
-        elif line.startswith("require "):
-            parts = line[len("require "):].split()  # "require example.com/m v1.2.3"
-            if parts:
-                deps.append(parts[0])
-    return deps
-
-def _go_dependency_count(directory):
-    """Count required modules in go.mod (kept for back-compat; delegates to _go_dependencies)."""
-    return len(_go_dependencies(directory))
-## ---------------------------------------------------------------------------------------- ##
-
-
-def _resolve_category(cats):
-    """
-    Picks ONE category out of all the votes the matched frameworks cast.
-
-    Args:
-        cats (list): the category each matched framework voted for (Nones allowed).
-
-    Returns:
-        str | None: 'full stack' if we saw both frontend AND backend, otherwise the highest-priority category present, or None if nothing voted.
-    """
-    seen = {c for c in cats if c}
-    if "frontend" in seen and "backend" in seen:  # front + back together -> full stack
-        return "full stack"
-    for pref in ("backend", "frontend", "desktop", "cli", "automation"):
-        if pref in seen:
-            return pref
-    return None
 
 def _human_size(num_bytes):
     """Turn a byte count into something readable (e.g. 1536 -> '1.5 KB')."""
@@ -307,56 +154,6 @@ def describe(info):
 def _is_recognised(info):
     """True if the classifier identified a language for this directory."""
     return info["language"] is not None
-
-# --- debug / CLI helpers ------------------------------------------------- #
-def _is_child(child, parent):
-    """
-    Checks whether `child` lives inside `parent` (i.e. parent is an ancestor of child).
-
-    Args:
-        child (str): the path we think is nested.
-        parent (str): the path we think is the ancestor.
-
-    Returns:
-        bool: True if child sits under parent (and isn't parent itself), else False.
-    """
-    child_abs = os.path.abspath(child)
-    parent_abs = os.path.abspath(parent)
-    if child_abs == parent_abs:
-        return False
-    try:
-        return os.path.commonpath([child_abs, parent_abs]) == parent_abs
-    except ValueError:  # e.g. different drives on Windows -> not related
-        return False
-
-def _nearest_project_ancestor(directory):
-    """Walk up from `directory` and hand back the closest parent that looks like a project (or None)."""
-    path = os.path.abspath(directory)
-    parent = os.path.dirname(path)
-    while parent and parent != path:
-        if _is_recognised(classify_directory(parent)):
-            return parent
-        path, parent = parent, os.path.dirname(parent)
-    return None
-
-def _directory_facts(directory):
-    """Dumps a bunch of low-level facts about a path, handy when something looks off."""
-    facts = {
-        "input": directory,
-        "abspath": os.path.abspath(directory),
-        "exists": os.path.exists(directory),
-        "is_dir": os.path.isdir(directory),
-        "is_file": os.path.isfile(directory),
-        "readable": os.access(directory, os.R_OK) if os.path.exists(directory) else False,
-        "is_symlink": os.path.islink(directory),
-        "realpath": os.path.realpath(directory),
-    }
-    try:
-        facts["size_bytes"] = os.path.getsize(directory)
-        facts["mtime"] = os.path.getmtime(directory)
-    except OSError:
-        facts["size_bytes"] = facts["mtime"] = None
-    return facts
 
 ## -- SCANNER ----------------------------------------------------------------------------- ##
 class Scanner:
@@ -443,11 +240,13 @@ class Scanner:
 
     def detect(self, directory, file_paths=None):
         """
-        Pokes at a directory and works out what kind of project it is. Always hands back a dict (never None) -> {"language", "frameworks", "category", "markers", "confidence", "metrics"}.
+        Pokes at a directory and works out what kind of project it is. Always hands back a dict (never None) -> {"language", "frameworks", "category", "markers", "confidence", "metrics", "dependencies", "breakdown"}.
+
+        Markers pick the candidate language + frameworks; the file-type census then sets the confidence and a composition breakdown, and can promote a backend-with-lots-of-markup project to "full stack" (see classifier._recognise).
 
         Args:
             directory (str): the dir to inspect.
-            file_paths (list): optional last-resort fallback -> if no manifest turns up we do a file-extension census over this list to guess the language.
+            file_paths (list): optional pre-scanned paths -> reused for metrics/census, and the last-resort file-extension census when no manifest turns up.
 
         Returns:
             dict: the classification. For repeated calls prefer the cached classify().
@@ -458,88 +257,103 @@ class Scanner:
         def has(*parts):
             return os.path.exists(os.path.join(directory, *parts))
 
+        def collect():
+            return _collect_files(directory, self._name_rules, self._path_rules, file_paths)
+
         # Python
         py_markers = [m for m in ("pyproject.toml", "requirements.txt", "setup.py", "Pipfile") if has(m)]
         if py_markers:
             deps = _python_dependencies(directory)
-            frameworks, cats = [], []
+            frameworks, cat_votes = [], []
             if has("manage.py"):  # near-definitive Django signal, better than reading deps
                 frameworks.append("django")
-                cats.append("backend")
+                cat_votes.append(("backend", W_MARKER))
             for dep, sig in PYTHON_SIGNALS.items():
                 fw, cat = sig[0], sig[1]  # tolerate extra tuple elements (e.g. flask's 'templates')
                 if dep in deps and fw not in frameworks:
                     frameworks.append(fw)
-                    cats.append(cat)
+                    if cat:
+                        cat_votes.append((cat, W_DEP))
             if not frameworks and has("app.py") and (has("templates") or has("static")):
                 frameworks.append("flask")
-                cats.append("backend")
-            category = _resolve_category(cats)
+                cat_votes.append(("backend", W_LAYOUT))
+            collected = collect()
+            category, confidence, breakdown = _recognise(
+                "python", cat_votes, True, _census([p for p, _ in collected]))
             if category is None and (has("setup.py") or has("pyproject.toml")):
                 category = "library"  # if its packaged, with no web framework -> treat it as a library
-            metrics = _directory_metrics(directory, self._name_rules, self._path_rules, len(deps), file_paths)
-            return _result("python", frameworks, category, py_markers, 0.9 if frameworks else 0.7, metrics, dependencies=deps)
+            metrics = _metrics(collected, len(deps))
+            return _result("python", frameworks, category, py_markers, confidence, metrics,
+                           dependencies=deps, breakdown=breakdown)
 
         # JavaScript / TypeScript
         js_markers = [m for m in ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml") if has(m)]
         if js_markers:
             pkg, deps = _js_dependencies(directory)
-            frameworks, cats = [], []
+            frameworks, cat_votes = [], []
             if has("next.config.js") or has("next.config.mjs") or "next" in deps:
                 frameworks.append("next.js")
-                cats.append("frontend")
+                cat_votes.append(("frontend", W_MARKER))
             if has("nuxt.config.js") or has("nuxt.config.mjs") or "nuxt" in deps:
                 frameworks.append("nuxt.js")
-                cats.append("frontend")
+                cat_votes.append(("frontend", W_MARKER))
             for dep, sig in JS_SIGNALS.items():
                 fw, cat = sig[0], sig[1]
                 if dep in deps and fw not in frameworks:
                     frameworks.append(fw)
-                    cats.append(cat)
-            category = _resolve_category(cats)
+                    if cat:
+                        cat_votes.append((cat, W_DEP))
+            language = "typescript" if has("tsconfig.json") else "javascript"
+            collected = collect()
+            category, confidence, breakdown = _recognise(
+                language, cat_votes, True, _census([p for p, _ in collected]))
             if category is None and isinstance(pkg.get("bin"), (str, dict)):
                 category = "cli"
-            language = "typescript" if has("tsconfig.json") else "javascript"
-            metrics = _directory_metrics(directory, self._name_rules, self._path_rules, len(deps), file_paths)
-            return _result(language, frameworks, category, js_markers, 0.9 if frameworks else 0.7, metrics, dependencies=deps)
+            metrics = _metrics(collected, len(deps))
+            return _result(language, frameworks, category, js_markers, confidence, metrics,
+                           dependencies=deps, breakdown=breakdown)
 
         # Rust
         rs_markers = [m for m in ("Cargo.toml", "Cargo.lock") if has(m)]
         if rs_markers:
+            cat_votes = []
             if has("src", "lib.rs") and not has("src", "main.rs"):
-                category = "library"
+                cat_votes.append(("library", W_MARKER))
             elif has("src", "main.rs"):
-                category = "application"
-            else:
-                category = None
+                cat_votes.append(("application", W_MARKER))
             rs_deps = list(_load_toml(os.path.join(directory, "Cargo.toml")).get("dependencies", {}) or {})
-            metrics = _directory_metrics(directory, self._name_rules, self._path_rules, len(rs_deps), file_paths)
-            return _result("rust", [], category, rs_markers, 0.9 if category else 0.7, metrics, dependencies=rs_deps)
+            collected = collect()
+            category, confidence, breakdown = _recognise(
+                "rust", cat_votes, True, _census([p for p, _ in collected]))
+            metrics = _metrics(collected, len(rs_deps))
+            return _result("rust", [], category, rs_markers, confidence, metrics,
+                           dependencies=rs_deps, breakdown=breakdown)
 
         # Go
         go_markers = [m for m in ("go.mod", "go.sum") if has(m)]
         if go_markers:
+            cat_votes = []
             if has("main.go") or (has("cmd") and os.path.isdir(os.path.join(directory, "cmd"))):
-                category = "application"
+                cat_votes.append(("application", W_MARKER))
             elif has("lib.go"):
-                category = "library"
-            else:
-                category = None
+                cat_votes.append(("library", W_MARKER))
             go_deps = _go_dependencies(directory)
-            metrics = _directory_metrics(directory, self._name_rules, self._path_rules, len(go_deps), file_paths)
-            return _result("go", [], category, go_markers, 0.9 if category else 0.7, metrics, dependencies=go_deps)
+            collected = collect()
+            category, confidence, breakdown = _recognise(
+                "go", cat_votes, True, _census([p for p, _ in collected]))
+            metrics = _metrics(collected, len(go_deps))
+            return _result("go", [], category, go_markers, confidence, metrics,
+                           dependencies=go_deps, breakdown=breakdown)
 
-        # Fallback: file-extension census
+        # Fallback: no manifest -> lean entirely on the file-extension census.
         if file_paths:
-            counts = {}
-            for p in file_paths:
-                lang = CODE_EXTENSIONS.get(os.path.splitext(p)[1].lower())
-                if lang:
-                    counts[lang] = counts.get(lang, 0) + 1
-            if counts:
-                language = max(counts, key=counts.get)
-                metrics = _directory_metrics(directory, self._name_rules, self._path_rules, 0, file_paths)
-                return _result(language, [], None, ["file-extension census"], 0.4, metrics)
+            census = _census(file_paths)
+            if census:
+                language = max(census, key=census.get)
+                category, confidence, breakdown = _recognise(language, [], False, census)
+                metrics = _metrics(collect(), 0)
+                return _result(language, [], category, ["file-extension census"], confidence, metrics,
+                               breakdown=breakdown)
 
         return _unknown()
 
@@ -700,7 +514,7 @@ def identify_directory_type(directory):
 ## ---------------------------------------------------------------------------------------- ##
 
 ## -- PERSISTENCE BRIDGE ------------------------------------------------------------------ ##
-# Glue between the scanner and the SQLite store (db_manager). db_manager is imported lazily so plain scanning never drags in the database layer.
+# Glue between the scanner and the SQLite store (db_manager). db_manager + cleaner are imported lazily so plain scanning never drags in the database or cleanup layers.
 def _project_record(path, info):
     """Flatten a resolve_relationships entry into the record shape db_manager.upsert_project wants."""
     c = info["classification"]
@@ -712,6 +526,7 @@ def _project_record(path, info):
         "frameworks": c["frameworks"],
         "markers": c["markers"],
         "metrics": c["metrics"],
+        "breakdown": c.get("breakdown"),
         "dependencies": c.get("dependencies", []),
         "parent_path": info["parent"],
         "role": info["role"],
@@ -721,7 +536,7 @@ def _project_record(path, info):
 
 def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True):
     """
-    Scan `directory`, classify every project under it, and store the lot in SQLite.
+    Scan 'directory', classify every project under it, and store the lot in SQLite.
 
     Args:
         directory (str): the workspace root to scan.
@@ -733,18 +548,24 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True)
         (scan_id, project_count): the stored scan's id and how many projects landed.
     """
     import db_manager  # local import -> the DB layer is optional for plain scanning
+    from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
 
-    files = scan_directory(directory, confirm_filters=confirm_filters)
-    rels = resolve_directory_relationships(files, mode)
+    sc = _default()
+    files = sc.scan(directory, confirm_filters=confirm_filters)
+    rels = sc.resolve_relationships(files, mode)
 
     db = db_manager.Database(db_path) if db_path else db_manager.Database()
     try:
         scan_id = db.start_scan(os.path.abspath(directory))
         total_files = total_bytes = 0
         for project, info in rels.items():
+            # Size up the regenerable bloat (node_modules, venv, ...) the scan filtered out.
+            marks = _collect_marks(project, sc._name_rules, sc._path_rules)
             record = _project_record(project, info)
+            record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
             pid = db.upsert_project(record, scan_id=scan_id)
             db.save_dependencies(pid, record["dependencies"])  # populate the dependencies table
+            db.save_marks(pid, marks)                          # populate the reclaimable marks
             total_files += record["metrics"]["file_count"]
             total_bytes += record["metrics"]["size_bytes"]
         db.finish_scan(scan_id, project_count=len(rels), file_count=total_files, total_bytes=total_bytes)
@@ -753,279 +574,8 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True)
         db.close()
 ## ---------------------------------------------------------------------------------------- ##
 
-def _cli():
-    """The interactive questionary menu shown when this file is run directly."""
-    import sys
-    import questionary
-
-    if not sys.stdin.isatty():
-        print("The interactive CLI needs a real terminal. Run: python utils/scanner.py")
-        return
-
-    def ask_dir(msg="Enter a directory:"):
-        return questionary.path(msg).ask()
-
-    # --- main actions ---------------------------------------------------- #
-    def do_scan():
-        directory = ask_dir("Directory to scan:")
-        if not directory:
-            return
-        apply_filters = questionary.confirm("Apply exclude filters?", default=True).ask()
-        files = scan_directory(directory, confirm_filters=apply_filters)
-        total_gb = sum(os.path.getsize(f) for f in files) / 1073741824
-        print(Panel(
-            f"Scanned [bold]{len(files)}[/] files, ~{total_gb:.2f} GB\n"
-            f"Type: {identify_directory_type(directory)}\n"
-            f"Filters: {'applied' if apply_filters else 'skipped'}",
-            title=f"Scan -> {directory}", style="green"))
-        if files and questionary.confirm("Show the file list?", default=False).ask():
-            print(Columns(files))
-
-    def do_classify():
-        directory = ask_dir("Directory to classify:")
-        if not directory:
-            return
-        info = classify_directory(directory)
-        print(Panel(describe(info), title="Best guess", style="cyan"))
-        print(info)  # rich pretty-prints the structured dict
-
-    def do_relationships():
-        directory = ask_dir("Directory to scan + map:")
-        if not directory:
-            return
-        mode = questionary.select("Relationship mode:",
-                                  choices=["CLASSIFY", "SKIP", "MERGE", "SPLIT"]).ask()
-        if not mode:
-            return
-        rels = resolve_directory_relationships(scan_directory(directory), mode=mode)
-        if not rels:
-            print("No recognised project directories in there.")
-            return
-        for proj, info in rels.items():
-            print(Panel(
-                f"type:     {info['type']}\n"
-                f"role:     {info['role']}\n"
-                f"parent:   {info['parent']}\n"
-                f"children: {len(info['children'])}\n"
-                f"symlink:  {info['is_symlink']}",
-                title=proj, style="cyan"))
-
-    def do_persist():
-        import db_manager  # lazy: only needed once you actually save to the DB
-        directory = ask_dir("Directory to scan + store:")
-        if not directory:
-            return
-        mode = questionary.select("Relationship mode:",
-                                  choices=["CLASSIFY", "SKIP", "MERGE", "SPLIT"]).ask()
-        if not mode:
-            return
-        scan_id, count = persist_scan(directory, mode=mode)
-        print(Panel(
-            f"Stored [bold]{count}[/] projects\n"
-            f"scan id:  {scan_id}\n"
-            f"database: {os.path.normpath(db_manager.DEFAULT_DB_PATH)}",
-            title="Saved to database", style="green"))
-
-    def do_browse():
-        import db_manager  # lazy: the DB layer is only needed for browsing
-        from rich.table import Table
-
-        db_path = questionary.path(
-            "Database file:", default=os.path.normpath(db_manager.DEFAULT_DB_PATH)
-        ).ask()
-        if not db_path:
-            return
-        if not os.path.exists(db_path):
-            print(f"No database at '{db_path}' yet. Run 'Scan + save to database' first.")
-            return
-
-        def show_projects(projects):
-            if not projects:
-                print("No matching projects.")
-                return
-            table = Table(title=f"{len(projects)} project(s)")
-            for col in ("path", "language", "category", "conf", "files", "deps"):
-                table.add_column(col, overflow="fold")
-            for p in projects:
-                table.add_row(
-                    p["path"], str(p["language"]), str(p["category"]),
-                    f"{p['confidence']:.2f}", str(p["file_count"]), str(len(p["dependencies"])),
-                )
-            print(table)
-
-        db = db_manager.Database(db_path)
-        try:
-            while True:
-                action = questionary.select(
-                    "Browse the database:",
-                    choices=[
-                        "List all projects",
-                        "Search (language / category / framework)",
-                        "View a project (details + deps)",
-                        "Latest scan",
-                        "Delete a project",
-                        "Back",
-                    ],
-                ).ask()
-                if action in (None, "Back"):
-                    return
-
-                if action == "List all projects":
-                    show_projects(db.all_projects())
-
-                elif action == "Search (language / category / framework)":
-                    language = questionary.text("language (blank to skip):").ask() or None
-                    category = questionary.text("category (blank to skip):").ask() or None
-                    framework = questionary.text("framework (blank to skip):").ask() or None
-                    show_projects(db.find_projects(language=language, category=category, framework=framework))
-
-                elif action == "View a project (details + deps)":
-                    directory = ask_dir("Project path:")
-                    if directory:
-                        p = db.get_project(directory)
-                        if p is None:
-                            print("That path isn't in the database.")
-                        else:
-                            frameworks = ", ".join(p["frameworks"]) or "(none)"
-                            deps = ", ".join(p["dependencies"]) or "(none)"
-                            print(Panel(
-                                f"language:   {p['language']}\n"
-                                f"category:   {p['category']}\n"
-                                f"confidence: {p['confidence']:.2f}\n"
-                                f"frameworks: {frameworks}\n"
-                                f"role:       {p['role']}\n"
-                                f"parent:     {p['parent_path']}\n"
-                                f"files:      {p['file_count']}  ({_human_size(p['size_bytes'])})\n"
-                                f"deps ({p['dependency_count']}): {deps}\n"
-                                f"first seen: {p['first_seen']}\n"
-                                f"updated:    {p['updated_at']}",
-                                title=p["path"], style="cyan"))
-
-                elif action == "Latest scan":
-                    scan = db.latest_scan()
-                    if scan is None:
-                        print("No scans recorded yet.")
-                    else:
-                        print(Panel(
-                            f"root:     {scan['root_path']}\n"
-                            f"started:  {scan['started_at']}\n"
-                            f"finished: {scan['finished_at']}\n"
-                            f"projects: {scan['project_count']}\n"
-                            f"files:    {scan['file_count']}\n"
-                            f"bytes:    {_human_size(scan['total_bytes'] or 0)}",
-                            title=f"Scan #{scan['id']}", style="cyan"))
-
-                elif action == "Delete a project":
-                    directory = ask_dir("Project path to delete:")
-                    if directory and questionary.confirm(f"Delete '{directory}' from the DB?", default=False).ask():
-                        ok = db.delete_project(directory)
-                        print("Deleted." if ok else "Nothing matched that path.")
-        finally:
-            db.close()
-
-    # --- Debug Submenu --------------------------------------------------- #
-    def do_debug():
-        while True:
-            check = questionary.select(
-                "Debug / checks:",
-                choices=[
-                    "Is X a child of Y?",
-                    "Is a path excluded by the filters?",
-                    "Show the compiled exclude rules",
-                    "Is it a recognised project?",
-                    "Nearest project ancestor",
-                    "Symlink info",
-                    "Directory facts (low-level dump)",
-                    "Back",
-                ],
-            ).ask()
-            if check in (None, "Back"):
-                return
-
-            if check == "Is X a child of Y?":
-                child = ask_dir("Child path:")
-                parent = ask_dir("Parent path:")
-                if child and parent:
-                    yes = _is_child(child, parent)
-                    print(f"{'✅' if yes else '❌'} '{child}' is "
-                          f"{'' if yes else 'NOT '}a child of '{parent}'")
-
-            elif check == "Is a path excluded by the filters?":
-                path = questionary.path("Path to test:").ask()
-                if path:
-                    sc = _default()
-                    blocked = _is_excluded(path, sc._name_rules, sc._path_rules)
-                    print(f"{'🚫 excluded' if blocked else '✅ kept'} -> {os.path.normpath(path)}")
-
-            elif check == "Show the compiled exclude rules":
-                sc = _default()
-                name_rules, path_rules = sc._name_rules, sc._path_rules
-                print(Panel(
-                    f"name rules ({len(name_rules)}):\n{sorted(name_rules)}\n\n"
-                    f"path rules ({len(path_rules)}):\n{sorted(path_rules)}",
-                    title="Compiled exclude rules", style="yellow"))
-
-            elif check == "Is it a recognised project?":
-                directory = ask_dir()
-                if directory:
-                    info = classify_directory(directory)
-                    print(f"{'✅ yes' if _is_recognised(info) else '❌ no'} -> {describe(info)}")
-
-            elif check == "Nearest project ancestor":
-                directory = ask_dir()
-                if directory:
-                    anc = _nearest_project_ancestor(directory)
-                    print(f"Nearest project ancestor -> {anc or '(none found)'}")
-
-            elif check == "Symlink info":
-                directory = ask_dir()
-                if directory:
-                    if os.path.islink(directory):
-                        print(f"🔗 symlink -> {os.path.realpath(directory)}")
-                    else:
-                        print("Not a symlink.")
-
-            elif check == "Directory facts (low-level dump)":
-                directory = ask_dir()
-                if directory:
-                    print(_directory_facts(directory))
-
-    actions = {
-        "Scan a directory": do_scan,
-        "Classify a directory": do_classify,
-        "Resolve relationships (scan + map)": do_relationships,
-        "Scan + save to database": do_persist,
-        "Browse the database": do_browse,
-        "Debug / checks": do_debug,
-    }
-    while True:
-        action = questionary.select("MnemoCetus -> pick an action:",
-                                    choices=list(actions) + ["Quit"]).ask()
-        if action in (None, "Quit"):
-            print("Bye! 🐳")
-            return
-        actions[action]()
-
 # MAIN
-# (if the file is run directly, usually for testing)
+# (run directly -> hand off to the interactive CLI, which lives in cli.py now)
 if __name__ == "__main__":
-              #👇  Show this in raw format so "\" will print.                          Do you like the ASCII?
-    print(Panel(r"""
-                                                                            __________...----..____..-'``-..___
-                                                                          ,'.                                  ```--.._
-                                                                         :                                             ``._
-                                                                        |                           --                    ``.
-                                                                        |                <o>   -.-      -.     -   -.        `.
-                                                                        : .                   __           --            .     \
-                                                                        `._____________     (  `.   -.-      --  -   .   `      \
-                                                                          `-----------------\   \_.--------..__..--.._ `. `.    :
-ooo        ooooo                                                     .oooooo.                \. /                     `-._ .    |
-`88.       .888'                                                    d8P'  `Y8b              .o8                           `.`   |
- 888b     d'888  ooo. .oo.    .ooooo.  ooo. .oo.  .oo.    .ooooo.  888           .ooooo.  .o888oo oooo  oooo   .oooo.o      \`  |
- 8 Y88. .P  888  `888P"Y88b  d88' `88b `888P"Y88bP"Y88b  d88' `88b 888          d88' `88b   888   `888  `888  d88(  "8       \  |
- 8  `888'   888   888   888  888ooo888  888   888   888  888   888 888          888ooo888   888    888   888  `"Y88b.        /  \`
- 8    Y     888   888   888  888    .o  888   888   888  888   888 `88b    ooo  888    .o   888 .  888   888  o.  )88b      /   .\
-o8o        o888o o888o o888o `Y8bod8P' o888o o888o o888o `Y8bod8P'  `Y8bood8P'  `Y8bod8P'   "888"  `V88V"V8P' 8""888P'     /  __ .\
-                                                                                                                          /_,'  \__\
-""", title="v0.4", subtitle="MnemoCetus", style="cyan"))
-    _cli()
+    from cli import main
+    main()

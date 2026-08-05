@@ -23,19 +23,31 @@ MnemoCetus is a developer workspace power tool designed to scan, analyse, and or
 
 ## What's in the name?
 
-MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memory) and the Greek God Anicetus (the Unconquerable One, and son of Heracles). It simultaneously plays on mnēmē (latin for memory) and Cetus, a legendary beast that roamed the deep oceans. Together, MnemoCetus represents an unconquerable leviathian that roams the deep sea of files on your system, ensuring it is protected, clean and secure.
+MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memory) and the Greek God Anicetus (the Unconquerable One, and son of Heracles). It simultaneously plays on mnēmē (greek for memory) and Cetus, a legendary beast that roamed the deep oceans. Together, MnemoCetus represents an unconquerable leviathian that roams the deep sea of files on your system, ensuring it is protected, clean and secure.
 
 ---
 
-## Features (Planned / In Progress)
+## Features
 
-* Scan directories for programming projects
-* Detect project roots and project types using marker files
-* Track file sizes and storage usage
-* Filter out unnecessary folders (e.g. node_modules, venv)
-* Generate workspace summaries
-* Identify large or unused files
-* Future: security scanning and dependency checks
+Working today:
+
+* Scan directories recursively for programming projects, filtering out junk (node_modules, venv, ...)
+* Detect project language, frameworks and type (backend / frontend / full stack / cli / library / ...)
+  for Python, JavaScript/TypeScript, Rust and Go via marker files + declared dependencies
+* Weighted **confidence score** and a composition **breakdown** per project, so a mostly-HTML repo
+  with one small Flask file isn't mislabelled "backend" (it's promoted to "full stack")
+* Store everything in a local SQLite database (scans, projects, dependencies, files, marks)
+* **Review low-confidence projects** and set a **user override** for what a project really is;
+  overrides survive re-scans
+* Flag **reclaimable space** ("marks") - regenerable bloat like node_modules / venv / build output -
+  and generate **safe, non-destructive cleanup recommendations** with potential savings
+* A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
+  recategorisation, and a cleanup-recommendations page
+
+Planned:
+
+* Security scanning and dependency checks
+* Automated organisation suggestions
 
 ---
 
@@ -43,8 +55,10 @@ MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memo
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-This project is in active development and currently progressing through the v0.2 scanner stage.
-The scanner now supports recursive scanning, filtering, and basic project detection (WIP) for Python, JavaScript/TypeScript, Rust, and Go using marker files.
+Active development, currently at **v0.4**. The classification engine, the SQLite metadata store,
+the low-confidence review / override flow, and the reclaimable-space + cleanup-recommendation
+features are all in. (The planned "smarter recognition" and "cleanup recommendations" milestones
+are bundled into this v0.4 release - see the roadmap.)
 
 ---
 
@@ -53,31 +67,47 @@ The scanner now supports recursive scanning, filtering, and basic project detect
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/mnemoguardian.git
-cd mnemoguardian
+git clone https://github.com/hottahidit/mnemocetus.git
+cd mnemocetus
 ```
 
-No dependencies are required yet (pure Python).
+Install the dependencies (the CLI uses `rich` + `questionary`; the optional web dashboard adds `flask`):
+
+```bash
+pip install -r requirements.txt
+```
+
+The core scanning + database layer is pure-stdlib Python; only the interactive CLI and the web
+dashboard need the packages above.
 
 ---
 
 ## Usage
 
-DISCLAIMER: As of v0.2, these are all the available features, and how to use them.
+### CLI
 
-Run the scanner:
+Run the interactive tool:
 
 ```bash
 python utils/scanner.py
 ```
 
-You will be prompted to enter a directory to scan.
+You get a menu: scan a directory, classify one, resolve relationships, **scan + save to database**,
+**browse the database** (list/search projects, latest scan, reclaimable space, cleanup
+recommendations, dependency overlap), and **review low-confidence projects** (set the real type /
+delete / "yes to all").
 
-Example:
+### Web dashboard (optional)
 
-```text
-Enter the directory to scan: /your/projects
+```bash
+python utils/web/app.py        # -> http://127.0.0.1:5000
 ```
+
+Four views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
+space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions), and
+**Overlap** (shared dependencies across projects + the space a shared/hardlinked package store could
+reclaim). MnemoCetus never deletes anything itself - cleanup is advisory, and the commands are shown
+for you to run.
 
 ---
 
@@ -85,8 +115,14 @@ Enter the directory to scan: /your/projects
 
 * v0.1: Basic directory scanner
 * v0.2: Project detection and filtering improvements
-* v0.3: Metadata storage system
+* v0.3: Metadata storage system (SQLite) + database viewer (+ the OOP scanner refactor folded in)
+* v0.4: Smarter recognition (weighted confidence, composition breakdown, review/override, web
+  dashboard) + reclaimable-space marks, safe cleanup recommendations, and cross-project
+  dependency-overlap analysis (+ the scanner split into classifier / cleaner / cli modules)
 * v1.0: Full workspace intelligence platform
+
+Note: the roadmap numbers are actual release versions. `PLAN.md` uses finer-grained planning
+milestones (its "v0.5" and "v0.6" feature buckets both ship inside release v0.4).
 
 ---
 

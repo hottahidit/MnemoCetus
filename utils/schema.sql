@@ -1,19 +1,20 @@
 -- ===========================================================================
 -- MnemoCetus metadata schema  (v0.4 - the "MnemoIndex" store)
 --
--- This is the single source of truth for the database shape. db_manager.py just
--- loads and runs this; it doesn't define tables itself. Everything uses
--- "IF NOT EXISTS" so re-running it on an existing DB is a no-op (idempotent).
+-- This is the single source of truth for the database shape.
+-- db_manager.py just loads and runs this; it doesn't define tables itself.
+-- Everything uses "IF NOT EXISTS" so re-running it on an existing DB is a no-op (idempotent).
 --
--- Four tables, exactly as PLAN.md v0.4 lays out:
+-- Five tables:
 --   scans         -> one row per scan run (the "when")
 --   projects      -> one row per discovered project (the "what")
 --   dependencies  -> declared deps, many-per-project
 --   files         -> file inventory, many-per-project
+--   marks         -> regenerable/reclaimable bloat dirs, many-per-project (v0.5 Stage B)
 -- ===========================================================================
 
--- A single sweep of the workspace. Lets us answer "what did the last scan find"
--- and keep a history of scans over time.
+-- A single sweep of the workspace.
+-- Lets us answer "what did the last scan find" and keep a history of scans over time.
 CREATE TABLE IF NOT EXISTS scans (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     root_path     TEXT    NOT NULL,        -- the directory we were asked to scan
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS scans (
     total_bytes   INTEGER DEFAULT 0
 );
 
--- One row per project directory we recognised. `path` is unique, so re-scanning
--- the same project updates its row in place rather than piling up duplicates.
+-- One row per project directory we recognised.
+-- 'path' is unique, so re-scanning the same project updates its row in place rather than piling up duplicates.
 CREATE TABLE IF NOT EXISTS projects (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     path             TEXT    NOT NULL UNIQUE,   -- absolute, normalised project path
@@ -42,14 +43,24 @@ CREATE TABLE IF NOT EXISTS projects (
     role             TEXT,                      -- root / child / merged / independent
     is_symlink       INTEGER DEFAULT 0,         -- 0/1 (SQLite has no real bool)
     symlink_target   TEXT,
+    -- recognition + user override (v0.5; added to existing DBs by the v2 migration)
+    breakdown           TEXT,                   -- JSON {languages:{}, categories:{}} composition
+    override_language   TEXT,                   -- user-set language (NULL -> use the auto-detected one)
+    override_category   TEXT,                   -- user-set category
+    override_frameworks TEXT,                   -- JSON array of user-set frameworks
+    override_note       TEXT,                   -- freeform, e.g. "backend done, frontend still to build"
+    user_confirmed      INTEGER DEFAULT 0,      -- 1 = user signed off / overrode (locked at full confidence)
+    -- reclaimable "marks" rollup (v0.5 Stage B; added to existing DBs by the v3 migration)
+    reclaimable_bytes   INTEGER DEFAULT 0,      -- total size of regenerable bloat (node_modules, venv, ...) under this project
     -- bookkeeping
     first_seen       TEXT,                      -- when we first indexed this project
     updated_at       TEXT,                      -- last time this row changed
     last_scan_id     INTEGER REFERENCES scans(id) ON DELETE SET NULL
 );
 
--- Declared dependencies, one row each. Cascade-deletes with the project so we
--- never leave orphans. UNIQUE keeps a re-scan from double-inserting the same dep.
+-- Declared dependencies, one row each.
+-- Cascade-deletes with the project so we never leave orphans.
+-- UNIQUE keeps a re-scan from double-inserting the same dep.
 CREATE TABLE IF NOT EXISTS dependencies (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -58,8 +69,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
     UNIQUE(project_id, name)
 );
 
--- File inventory for a project (path + size + extension). Optional to populate;
--- handy later for storage analysis (v0.5: "largest files").
+-- File inventory for a project (path + size + extension).
+-- Optional to populate; handy later for storage analysis (v0.5: "largest files").
 CREATE TABLE IF NOT EXISTS files (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -69,10 +80,24 @@ CREATE TABLE IF NOT EXISTS files (
     UNIQUE(project_id, path)
 );
 
--- Indexes for the lookups we expect to do a lot of (search by language/category,
--- "which projects use X", and joining files/deps back to their project).
+-- Reclaimable "marks": regenerable/bloat directories (node_modules, venv, target, __pycache__, dist, build, ...) that the scan filters out of a project but that we still size up so the user knows how much disk they could get back.
+-- Many-per-project, cascade-deletes with the project.
+CREATE TABLE IF NOT EXISTS marks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT,                            -- dependencies / virtualenv / build / cache
+    name        TEXT,                            -- node_modules / target / __pycache__ / ...
+    path        TEXT    NOT NULL,                -- absolute path of the reclaimable directory
+    size_bytes  INTEGER DEFAULT 0,               -- how much it weighs
+    file_count  INTEGER DEFAULT 0,
+    reason      TEXT,                            -- how it's regenerated (e.g. "npm install")
+    UNIQUE(project_id, path)
+);
+
+-- Indexes for the lookups we expect to do a lot of (search by language/category, "which projects use X", and joining files/deps back to their project).
 CREATE INDEX IF NOT EXISTS idx_projects_language   ON projects(language);
 CREATE INDEX IF NOT EXISTS idx_projects_category   ON projects(category);
 CREATE INDEX IF NOT EXISTS idx_dependencies_name   ON dependencies(name);
 CREATE INDEX IF NOT EXISTS idx_dependencies_project ON dependencies(project_id);
 CREATE INDEX IF NOT EXISTS idx_files_project       ON files(project_id);
+CREATE INDEX IF NOT EXISTS idx_marks_project       ON marks(project_id);
