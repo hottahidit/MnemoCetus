@@ -142,6 +142,22 @@ milestones (its "v0.5" and "v0.6" feature buckets both ship inside release v0.4)
 
 ---
 
+## Branches
+
+* **`main`** - the stable, public branch. Its interactive CLI is the streamlined
+  scan -> explore -> save flow (no developer debug/checks menu), and the test suite is not tracked.
+* **`nightly`** - the development branch. It tracks the full test suite under `utils/tests/`
+  (`test_suite.py`, `test_db_manager.py`, `test_web.py` - 169 tests across the scanner, database, and
+  web layers) and keeps the CLI's debug/checks submenu, so it's the branch to run the tests and hack on.
+
+Run the tests (on `nightly`) from the repo root with:
+
+```bash
+python -m unittest discover -s utils/tests
+```
+
+---
+
 ## Goals
 
 MnemoCetus aims to become a developer workspace assistant that:
