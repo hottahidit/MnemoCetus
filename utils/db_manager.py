@@ -532,6 +532,64 @@ class Database:
             "by_ecosystem": by_ecosystem,
         }
 
+    def storage_report(self, limit=10):
+        """
+        Workspace-wide storage analysis for the CLI + web -> where the bytes actually live.
+
+        Totals come from the DISTINCT file inventory: a file nested under both a parent and a child project is stored under each, so we de-duplicate by path here rather than double-count it.
+
+        Args:
+            limit (int): how many rows to return in each "largest" ranking (default 10).
+
+        Returns:
+            dict: {
+                total_bytes: int,            # size of every distinct indexed file
+                total_files: int,            # count of distinct indexed files
+                project_count: int,
+                reclaimable_bytes: int,      # regenerable-bloat rollup (see reclaimable_summary)
+                largest_projects: [ {path, size_bytes, reclaimable_bytes}, ... ],  # biggest first
+                largest_files:    [ {path, size_bytes}, ... ],
+                largest_dirs:     [ {path, size_bytes, file_count}, ... ],  # by bytes held directly
+            }
+        """
+        distinct_files = "SELECT path, MAX(size_bytes) AS size FROM files GROUP BY path"
+
+        totals = self.con.execute(
+            f"SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM ({distinct_files})"
+        ).fetchone()
+        project_count = self.con.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        reclaimable = self.con.execute(
+            "SELECT COALESCE(SUM(reclaimable_bytes), 0) FROM projects"
+        ).fetchone()[0]
+
+        largest_projects = [dict(r) for r in self.con.execute(
+            "SELECT path, size_bytes, reclaimable_bytes FROM projects "
+            "ORDER BY size_bytes DESC LIMIT ?", (limit,))]
+        largest_files = [dict(r) for r in self.con.execute(
+            f"SELECT path, size AS size_bytes FROM ({distinct_files}) "
+            "ORDER BY size DESC LIMIT ?", (limit,))]
+
+        # Roll the distinct files up by their immediate parent directory (Python-side -> portable SQLite has no dirname()).
+        dir_bytes, dir_count = {}, {}
+        for r in self.con.execute(distinct_files):
+            d = os.path.dirname(r["path"])
+            dir_bytes[d] = dir_bytes.get(d, 0) + (r["size"] or 0)
+            dir_count[d] = dir_count.get(d, 0) + 1
+        largest_dirs = [
+            {"path": d, "size_bytes": b, "file_count": dir_count[d]}
+            for d, b in sorted(dir_bytes.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        ]
+
+        return {
+            "total_bytes": totals["b"],
+            "total_files": totals["n"],
+            "project_count": project_count,
+            "reclaimable_bytes": reclaimable,
+            "largest_projects": largest_projects,
+            "largest_files": largest_files,
+            "largest_dirs": largest_dirs,
+        }
+
     def latest_scan(self):
         """The most recent scan row as a dict, or None if nothing's been scanned yet."""
         row = self.con.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()

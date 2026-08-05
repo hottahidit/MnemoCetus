@@ -41,8 +41,12 @@ Working today:
   overrides survive re-scans
 * Flag **reclaimable space** ("marks") - regenerable bloat like node_modules / venv / build output -
   and generate **safe, non-destructive cleanup recommendations** with potential savings
+* **Storage analysis** - workspace size rollup plus the largest projects / files / directories,
+  backed by a persisted per-project file inventory
+* **Cross-project dependency overlap** - the shared packages across your projects and a rough
+  estimate of the space a shared/hardlinked package store (uv, pnpm) could reclaim
 * A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
-  recategorisation, and a cleanup-recommendations page
+  recategorisation, cleanup recommendations, dependency overlap, and storage analysis
 
 Planned:
 
@@ -55,10 +59,11 @@ Planned:
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-Active development, currently at **v0.4**. The classification engine, the SQLite metadata store,
-the low-confidence review / override flow, and the reclaimable-space + cleanup-recommendation
-features are all in. (The planned "smarter recognition" and "cleanup recommendations" milestones
-are bundled into this v0.4 release - see the roadmap.)
+Active development, currently at **v0.4.3**. The classification engine, the SQLite metadata store,
+the low-confidence review / override flow, the reclaimable-space + cleanup-recommendation features,
+cross-project dependency overlap, and storage analysis are all in. (The planned "smarter recognition"
+and "cleanup recommendations" milestones are bundled into the v0.4 release; v0.4.3 adds the storage
+analyser - see the roadmap.)
 
 ---
 
@@ -94,8 +99,8 @@ python utils/scanner.py
 
 You get a menu: scan a directory, classify one, resolve relationships, **scan + save to database**,
 **browse the database** (list/search projects, latest scan, reclaimable space, cleanup
-recommendations, dependency overlap), and **review low-confidence projects** (set the real type /
-delete / "yes to all").
+recommendations, dependency overlap, storage analysis), and **review low-confidence projects** (set
+the real type / delete / "yes to all").
 
 ### Web dashboard (optional)
 
@@ -103,10 +108,10 @@ delete / "yes to all").
 python utils/web/app.py        # -> http://127.0.0.1:5000
 ```
 
-Four views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
-space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions), and
+Five views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
+space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions),
 **Overlap** (shared dependencies across projects + the space a shared/hardlinked package store could
-reclaim). MnemoCetus never deletes anything itself - cleanup is advisory, and the commands are shown
+reclaim), and **Storage** (largest projects / files / directories). MnemoCetus never deletes anything itself - cleanup is advisory, and the commands are shown
 for you to run.
 
 ---

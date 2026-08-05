@@ -566,6 +566,8 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True)
             pid = db.upsert_project(record, scan_id=scan_id)
             db.save_dependencies(pid, record["dependencies"])  # populate the dependencies table
             db.save_marks(pid, marks)                          # populate the reclaimable marks
+            # Persist the per-project file inventory too (reuses the scan's file list) -> feeds the storage analyser's "largest files / directories".
+            db.save_files(pid, _collect_files(project, sc._name_rules, sc._path_rules, files))
             total_files += record["metrics"]["file_count"]
             total_bytes += record["metrics"]["size_bytes"]
         db.finish_scan(scan_id, project_count=len(rels), file_count=total_files, total_bytes=total_bytes)

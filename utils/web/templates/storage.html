@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %} - Storage{% endblock %}
+{% block content %}
+
+  <h2>Storage analysis</h2>
+  <p class="muted">Where the bytes actually live &mdash; the heaviest projects, files, and directories
+     across your workspace. Totals count each file once, even when it sits inside a nested project.</p>
+
+  {% if not report or not report.total_files %}
+    <p class="muted">No file inventory recorded yet. Run <strong>Scan + save to database</strong>
+      (the scan now stores each project's file list), then reload.</p>
+  {% else %}
+    <div class="cards">
+      <div class="card"><div class="n">{{ report.total_bytes | humansize }}</div><div class="l">workspace size</div></div>
+      <div class="card"><div class="n">{{ report.total_files }}</div><div class="l">files</div></div>
+      <div class="card"><div class="n">{{ report.project_count }}</div><div class="l">projects</div></div>
+      <div class="card"><div class="n">{{ report.reclaimable_bytes | humansize }}</div><div class="l">reclaimable</div></div>
+    </div>
+
+    <h3>Largest projects</h3>
+    <table>
+      <tr><th>project</th><th>size</th><th>reclaimable</th></tr>
+      {% for p in report.largest_projects %}
+        <tr>
+          <td><code>{{ p.path }}</code></td>
+          <td>{{ p.size_bytes | humansize }}</td>
+          <td class="muted">{% if p.reclaimable_bytes %}{{ p.reclaimable_bytes | humansize }}{% else %}&mdash;{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </table>
+
+    <h3>Largest files</h3>
+    <table>
+      <tr><th>file</th><th>size</th></tr>
+      {% for f in report.largest_files %}
+        <tr><td><code>{{ f.path }}</code></td><td>{{ f.size_bytes | humansize }}</td></tr>
+      {% endfor %}
+    </table>
+
+    <h3>Largest directories <span class="muted">(bytes held directly)</span></h3>
+    <table>
+      <tr><th>directory</th><th>size</th><th>files</th></tr>
+      {% for d in report.largest_dirs %}
+        <tr><td><code>{{ d.path }}</code></td><td>{{ d.size_bytes | humansize }}</td><td class="muted">{{ d.file_count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+{% endblock %}

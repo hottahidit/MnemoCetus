@@ -1,10 +1,11 @@
 # Flask web app for MnemoCetus (v0.4 - the browser front-end over the "MnemoIndex" store and "MnemoClean" cleanup).
 #
-# Four views:
+# Five views:
 #   /          -> statistics dashboard (totals, by-language / by-category, confidence spread, reclaimable space)
 #   /projects  -> filterable database viewer with recategorisation, which POSTs into db_manager.set_override / approve / clear_override / delete_project.
 #   /cleanup   -> reclaimable-space cleanup recommendations (advisory only; never deletes anything).
 #   /overlap   -> cross-project dependency overlap + rough env savings from a shared package store.
+#   /storage   -> storage analysis (largest projects / files / directories + workspace rollup).
 #
 # NOTE: this is a local, single-user tool, so the mutating POST routes don't carry CSRF tokens.
 
@@ -77,6 +78,16 @@ def _overlap(db_path, min_projects=2):
     db = db_manager.Database(db_path)
     try:
         return db.dependency_overlap(min_projects=min_projects)
+    finally:
+        db.close()
+
+def _storage(db_path, limit=10):
+    """Workspace storage analysis (largest projects / files / dirs), or None when there's no database yet."""
+    if not os.path.exists(db_path):
+        return None
+    db = db_manager.Database(db_path)
+    try:
+        return db.storage_report(limit=limit)
     finally:
         db.close()
 
@@ -199,6 +210,14 @@ def create_app(db_path=None):
             db_path=os.path.normpath(current_db()),
             overlap=_overlap(current_db(), min_projects=min_projects),
             min_projects=min_projects,
+        )
+
+    @app.route("/storage")
+    def storage_view():
+        return render_template(
+            "storage.html",
+            db_path=os.path.normpath(current_db()),
+            report=_storage(current_db()),
         )
 
     # --- mutations: POST then redirect back (preserving the current filters) -------- #

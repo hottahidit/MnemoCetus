@@ -180,6 +180,7 @@ def _cli():
                         "Reclaimable space (regenerable bloat)",
                         "Cleanup recommendations",
                         "Dependency overlap (shared deps / env savings)",
+                        "Storage analysis (largest projects / files / dirs)",
                         "Delete a project",
                         "Back",
                     ],
@@ -303,6 +304,37 @@ def _cli():
                             for d in top:
                                 table.add_row(d["name"], str(d["ecosystem"]), str(d["project_count"]))
                             print(table)
+
+                elif action == "Storage analysis (largest projects / files / dirs)":
+                    report = db.storage_report()
+                    if not report["total_files"]:
+                        print("No file inventory recorded yet -> run 'Scan + save to database' first.")
+                    else:
+                        from rich.table import Table
+                        print(Panel(
+                            f"Workspace: [bold]{_human_size(report['total_bytes'])}[/] across "
+                            f"{report['total_files']} files in {report['project_count']} project(s).\n"
+                            f"Reclaimable (regenerable bloat): {_human_size(report['reclaimable_bytes'])}",
+                            title="Storage analysis", style="yellow"))
+                        proj = Table(title="largest projects")
+                        for c in ("project", "size", "reclaimable"):
+                            proj.add_column(c, overflow="fold")
+                        for p in report["largest_projects"]:
+                            proj.add_row(p["path"], _human_size(p["size_bytes"] or 0),
+                                         _human_size(p["reclaimable_bytes"] or 0))
+                        print(proj)
+                        files_t = Table(title="largest files")
+                        for c in ("file", "size"):
+                            files_t.add_column(c, overflow="fold")
+                        for f in report["largest_files"]:
+                            files_t.add_row(f["path"], _human_size(f["size_bytes"] or 0))
+                        print(files_t)
+                        dirs_t = Table(title="largest directories (bytes held directly)")
+                        for c in ("directory", "size", "files"):
+                            dirs_t.add_column(c, overflow="fold")
+                        for d in report["largest_dirs"]:
+                            dirs_t.add_row(d["path"], _human_size(d["size_bytes"] or 0), str(d["file_count"]))
+                        print(dirs_t)
 
                 elif action == "Delete a project":
                     directory = ask_dir("Project path to delete:")
