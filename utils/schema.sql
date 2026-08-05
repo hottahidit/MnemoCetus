@@ -64,8 +64,9 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS dependencies (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    name        TEXT    NOT NULL,
-    ecosystem   TEXT,                            -- python / javascript / rust / go
+    name         TEXT    NOT NULL,
+    ecosystem    TEXT,                           -- python / javascript / rust / go
+    version_spec TEXT,                           -- declared constraint (==2.0, ^1.3, >=4,<5; NULL/'' = unpinned) - v0.5 dependency intelligence
     UNIQUE(project_id, name)
 );
 
@@ -94,6 +95,21 @@ CREATE TABLE IF NOT EXISTS marks (
     UNIQUE(project_id, path)
 );
 
+-- Security findings from "MnemoScan": hard-coded secrets (regex scan) and optional dependency vulnerabilities (pip-audit / npm audit).
+-- Many-per-project, cascade-deletes with the project.
+-- The 'detail' for a secret is MASKED, never the raw value. - v0.5
+CREATE TABLE IF NOT EXISTS security_findings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT,                            -- secret / vuln
+    rule        TEXT,                            -- rule name (secret) or package + advisory id (vuln)
+    severity    TEXT,                            -- high / medium / low
+    path        TEXT,                            -- file the finding is in
+    line        INTEGER DEFAULT 0,               -- line number (0 for whole-project findings)
+    detail      TEXT,                            -- masked secret preview, or a short vuln description
+    UNIQUE(project_id, kind, rule, path, line)
+);
+
 -- Indexes for the lookups we expect to do a lot of (search by language/category, "which projects use X", and joining files/deps back to their project).
 CREATE INDEX IF NOT EXISTS idx_projects_language   ON projects(language);
 CREATE INDEX IF NOT EXISTS idx_projects_category   ON projects(category);
@@ -101,3 +117,4 @@ CREATE INDEX IF NOT EXISTS idx_dependencies_name   ON dependencies(name);
 CREATE INDEX IF NOT EXISTS idx_dependencies_project ON dependencies(project_id);
 CREATE INDEX IF NOT EXISTS idx_files_project       ON files(project_id);
 CREATE INDEX IF NOT EXISTS idx_marks_project       ON marks(project_id);
+CREATE INDEX IF NOT EXISTS idx_security_project    ON security_findings(project_id);

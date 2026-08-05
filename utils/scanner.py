@@ -23,12 +23,17 @@ def _load_exclude_list():
     Returns:
         list: the raw lines (Scanner compiles them into rules). This is the only file I/O, and it runs when a Scanner is built, not at import.
     """
+    # Resolve the exclude_list dir relative to THIS file (utils/), not the current working directory,
+    # so the CLI works no matter where it's launched from (e.g. from inside utils/, not just the repo root).
+    here = os.path.dirname(os.path.abspath(__file__))
+    custom = os.path.join(here, "exclude_list", "custom_exclude_list.txt")
+    default = os.path.join(here, "exclude_list", "default_exclude_list.txt")
     try:
-        with open('utils/exclude_list/custom_exclude_list.txt', 'r') as f:
+        with open(custom, 'r') as f:
             return f.read().splitlines()
     except FileNotFoundError:
         print("Custom exclude list not found, proceeding without it. (If it exists, name your custom list 'custom_exclude_list.txt' and place it in the 'exclude_list' folder to use it.)")
-        with open('utils/exclude_list/default_exclude_list.txt', 'r') as f:
+        with open(default, 'r') as f:
             return f.read().splitlines()
 
 def compile_exclude_rules(exclude_list):
@@ -321,7 +326,10 @@ class Scanner:
                 cat_votes.append(("library", W_MARKER))
             elif has("src", "main.rs"):
                 cat_votes.append(("application", W_MARKER))
-            rs_deps = list(_load_toml(os.path.join(directory, "Cargo.toml")).get("dependencies", {}) or {})
+            rs_table = _load_toml(os.path.join(directory, "Cargo.toml")).get("dependencies", {}) or {}
+            # Cargo dep values are either a version string or a table ({version = "1.3", ...}).
+            rs_deps = {name: (v if isinstance(v, str) else (v.get("version", "") if isinstance(v, dict) else ""))
+                       for name, v in rs_table.items()}
             collected = collect()
             category, confidence, breakdown = _recognise(
                 "rust", cat_votes, True, _census([p for p, _ in collected]))
@@ -435,7 +443,8 @@ class Scanner:
                 path, parent = parent, os.path.dirname(parent)
             return None
 
-        # Build the base relationship map. This is the full, classified tree used by CLASSIFY.
+        # Build the base relationship map.
+        # This is the full, classified tree used by CLASSIFY.
         for project in project_dirs:
             parent = nearest_project_ancestor(project)
             is_symlink = os.path.islink(project)
@@ -528,13 +537,14 @@ def _project_record(path, info):
         "metrics": c["metrics"],
         "breakdown": c.get("breakdown"),
         "dependencies": c.get("dependencies", []),
+        "dependency_specs": c.get("dependency_specs", {}),
         "parent_path": info["parent"],
         "role": info["role"],
         "is_symlink": info["is_symlink"],
         "symlink_target": info["symlink_target"],
     }
 
-def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True):
+def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True, security=True):
     """
     Scan 'directory', classify every project under it, and store the lot in SQLite.
 
@@ -543,12 +553,14 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True)
         db_path (str): where the .db file lives (None -> db_manager's default path).
         mode (str): relationship mode for resolve_relationships (CLASSIFY/SKIP/MERGE/SPLIT).
         confirm_filters (bool): apply the exclude filters while scanning (default True).
+        security (bool): run the MnemoScan secret scan per project and store findings (default True).
 
     Returns:
         (scan_id, project_count): the stored scan's id and how many projects landed.
     """
     import db_manager  # local import -> the DB layer is optional for plain scanning
     from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
+    from security import scan_secrets  # local import -> keep the security layer out of plain scanning
 
     sc = _default()
     files = sc.scan(directory, confirm_filters=confirm_filters)
@@ -564,10 +576,15 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True)
             record = _project_record(project, info)
             record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
             pid = db.upsert_project(record, scan_id=scan_id)
-            db.save_dependencies(pid, record["dependencies"])  # populate the dependencies table
+            # Populate the dependencies table, tagging each with its ecosystem (the project language) and declared version spec -> feeds the dependency-intelligence conflict check.
+            db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],
+                                 specs=record["dependency_specs"])
             db.save_marks(pid, marks)                          # populate the reclaimable marks
             # Persist the per-project file inventory too (reuses the scan's file list) -> feeds the storage analyser's "largest files / directories".
             db.save_files(pid, _collect_files(project, sc._name_rules, sc._path_rules, files))
+            if security:
+                # MnemoScan: flag hard-coded secrets in the project's files (values are masked before storage).
+                db.save_security_findings(pid, scan_secrets(project, sc._name_rules, sc._path_rules))
             total_files += record["metrics"]["file_count"]
             total_bytes += record["metrics"]["size_bytes"]
         db.finish_scan(scan_id, project_count=len(rels), file_count=total_files, total_bytes=total_bytes)

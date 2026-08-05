@@ -58,4 +58,36 @@
     {% endif %}
   {% endif %}
 
+  <h2>Version compatibility <span class="muted">(shareable-venv check)</span></h2>
+  <p class="muted">Whether projects could share one environment, or <strong>conflict</strong> because they
+     pin different exact versions of the same package. Heuristic: only differing <em>exact</em> pins
+     count as a conflict; ranges are assumed compatible, so this flags the certain clashes, not every risk.</p>
+
+  {% if not intel or not intel.ecosystems %}
+    <p class="muted">No ecosystem spans 2+ projects yet.</p>
+  {% else %}
+    {% for eco, d in intel.ecosystems.items() %}
+      <h3>{{ eco }} <span class="muted">({{ d.project_count }} projects)</span></h3>
+      {% if d.shareable %}
+        <p><span class="tag">shareable</span> All {{ d.project_count }} {{ eco }} projects could share
+           one environment &mdash; no conflicting exact pins.</p>
+      {% else %}
+        <p>{{ d.conflicting_projects | length }} of {{ d.project_count }} conflict on exact pins; the
+           other {{ d.shareable_projects | length }} could share an environment.</p>
+        <table>
+          <tr><th>dependency</th><th>version</th><th>projects</th></tr>
+          {% for cf in d.conflicts %}
+            {% for ver, paths in cf.pins.items() %}
+              <tr>
+                <td>{% if loop.first %}<code>{{ cf.name }}</code>{% endif %}</td>
+                <td>{{ ver }}</td>
+                <td class="muted">{{ paths | join(', ') }}</td>
+              </tr>
+            {% endfor %}
+          {% endfor %}
+        </table>
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+
 {% endblock %}

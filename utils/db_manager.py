@@ -5,9 +5,10 @@
 from datetime import datetime, timezone
 import os
 import json
+import re
 import sqlite3
 
-SCHEMA_VERSION = 3  # NOTE: Remember to bump this value with every new update
+SCHEMA_VERSION = 5  # NOTE: Remember to bump this value with every new update
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mnemocetus.db")
 
@@ -43,6 +44,23 @@ def _loads_breakdown(value):
         return data if isinstance(data, dict) else {"languages": {}, "categories": {}}
     except (ValueError, TypeError):
         return {"languages": {}, "categories": {}}
+
+
+_RANGE_TOKENS = ("^", "~", ">", "<", "*", "||", " - ")
+
+def _pinned_version(spec):
+    """
+    The exact version a spec pins, or None when it's a range / wildcard / unconstrained.
+
+    Recognises pip '==1.2.3' / '===1.2.3', a bare '1.2.3', and npm/go 'v1.2.3'. Anything carrying a range operator (^ ~ > < * || or a comma-separated list) is treated as NOT an exact pin -> we only ever flag a conflict on two DIFFERENT exact pins, never on ranges we can't fully solve.
+    """
+    if not spec:
+        return None
+    s = spec.strip()
+    if "," in s or any(tok in s for tok in _RANGE_TOKENS):
+        return None
+    m = re.match(r"^={0,3}\s*v?([0-9][0-9A-Za-z.\-+]*)$", s)
+    return m.group(1) if m else None
 
 
 class Database:
@@ -90,6 +108,10 @@ class Database:
             self._migrate_to_v2()  # v0.5 recognition breakdown + user override columns
         if from_version < 3:
             self._migrate_to_v3()  # v0.5 Stage B reclaimable "marks"
+        if from_version < 4:
+            self._migrate_to_v4()  # v0.5 dependency version specs
+        if from_version < 5:
+            self._migrate_to_v5()  # v0.5 MnemoScan security findings
         self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.con.commit()
 
@@ -129,6 +151,35 @@ class Database:
             """
         )
         self.con.execute("CREATE INDEX IF NOT EXISTS idx_marks_project ON marks(project_id)")
+
+    def _migrate_to_v4(self):
+        """Add the version_spec column to the dependencies table, if that table exists (idempotent)."""
+        tables = {r["name"] for r in self.con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "dependencies" not in tables:
+            return  # a partial old DB with no dependencies table -> nothing to migrate
+        existing = {r["name"] for r in self.con.execute("PRAGMA table_info(dependencies)")}
+        if "version_spec" not in existing:
+            self.con.execute("ALTER TABLE dependencies ADD COLUMN version_spec TEXT")
+
+    def _migrate_to_v5(self):
+        """Add the security_findings table + its index to an existing DB (idempotent)."""
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS security_findings (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                kind        TEXT,
+                rule        TEXT,
+                severity    TEXT,
+                path        TEXT,
+                line        INTEGER DEFAULT 0,
+                detail      TEXT,
+                UNIQUE(project_id, kind, rule, path, line)
+            )
+            """
+        )
+        self.con.execute("CREATE INDEX IF NOT EXISTS idx_security_project ON security_findings(project_id)")
     # ------------------------------------------------------------------------ #
 
     # -- Scans --------------------------------------------------------------- #
@@ -241,9 +292,9 @@ class Database:
             "SELECT id FROM projects WHERE path = ?", (path,)
         ).fetchone()[0]
 
-    def save_dependencies(self, project_id, names, ecosystem=None, replace=True):
+    def save_dependencies(self, project_id, names, ecosystem=None, specs=None, replace=True):
         """
-        Store a project's dependency names.
+        Store a project's dependency names (and their declared version specs).
         By default this REPLACES the project's existing deps so a re-scan reflects what's currently declared (drops removed ones).
         Set replace=False to only add.
 
@@ -251,13 +302,15 @@ class Database:
             project_id (int): which project these belong to.
             names (iterable): dependency names.
             ecosystem (str): python / javascript / rust / go (optional tag).
+            specs (dict): optional {name: version_spec} -> the declared constraint per dep (e.g. "==2.0").
             replace (bool): wipe existing deps first (default True).
         """
         if replace:
             self.con.execute("DELETE FROM dependencies WHERE project_id = ?", (project_id,))
+        specs = specs or {}
         self.con.executemany(
-            "INSERT OR IGNORE INTO dependencies (project_id, name, ecosystem) VALUES (?, ?, ?)",
-            [(project_id, n, ecosystem) for n in names],
+            "INSERT OR IGNORE INTO dependencies (project_id, name, ecosystem, version_spec) VALUES (?, ?, ?, ?)",
+            [(project_id, n, ecosystem, specs.get(n) or None) for n in names],
         )
         self.con.commit()
 
@@ -304,6 +357,25 @@ class Database:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(project_id, m.get("kind"), m.get("name"), m["path"],
               m.get("size_bytes", 0), m.get("file_count", 0), m.get("reason")) for m in marks],
+        )
+        self.con.commit()
+
+    def save_security_findings(self, project_id, findings, replace=True):
+        """
+        Store a project's MnemoScan security findings (secrets and/or dependency vulnerabilities).
+
+        Args:
+            project_id (int): which project these belong to.
+            findings (iterable): each a dict {kind, rule, severity, path, line, detail}. For a secret, 'detail' must already be MASKED -> we never persist a raw secret.
+            replace (bool): wipe the project's existing findings first (default True), so a re-scan reflects what's currently there.
+        """
+        if replace:
+            self.con.execute("DELETE FROM security_findings WHERE project_id = ?", (project_id,))
+        self.con.executemany(
+            "INSERT OR IGNORE INTO security_findings (project_id, kind, rule, severity, path, line, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(project_id, f.get("kind"), f.get("rule"), f.get("severity"),
+              f.get("path"), f.get("line", 0), f.get("detail")) for f in findings],
         )
         self.con.commit()
     # ------------------------------------------------------------------------ #
@@ -360,7 +432,7 @@ class Database:
     def get_dependencies(self, project_id):
         """Return the dependency rows (as dicts) for a project."""
         rows = self.con.execute(
-            "SELECT name, ecosystem FROM dependencies WHERE project_id = ? ORDER BY name",
+            "SELECT name, ecosystem, version_spec FROM dependencies WHERE project_id = ? ORDER BY name",
             (project_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -373,6 +445,44 @@ class Database:
             (project_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    _SEVERITY_ORDER = "CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END"
+
+    def get_security_findings(self, project_id):
+        """Return a project's security findings (as dicts), most severe first."""
+        rows = self.con.execute(
+            "SELECT kind, rule, severity, path, line, detail FROM security_findings "
+            f"WHERE project_id = ? ORDER BY {self._SEVERITY_ORDER}, path, line",
+            (project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def security_summary(self, limit=100):
+        """
+        Workspace-wide MnemoScan rollup for the CLI + web.
+
+        Returns:
+            dict: {
+                total: int,                       # every finding
+                by_severity: {severity: count},   # high / medium / low (high first)
+                by_kind: {kind: count},           # secret / vuln
+                findings: [ {project_path, kind, rule, severity, path, line, detail}, ... ],  # most severe first
+            }
+        """
+        by_severity, by_kind, total = {}, {}, 0
+        for r in self.con.execute(
+            "SELECT severity, COUNT(*) AS n FROM security_findings "
+            f"GROUP BY severity ORDER BY {self._SEVERITY_ORDER}"
+        ):
+            by_severity[r["severity"] or "unknown"] = r["n"]
+            total += r["n"]
+        for r in self.con.execute("SELECT kind, COUNT(*) AS n FROM security_findings GROUP BY kind"):
+            by_kind[r["kind"] or "other"] = r["n"]
+        findings = [dict(r) for r in self.con.execute(
+            "SELECT s.kind, s.rule, s.severity, s.path, s.line, s.detail, p.path AS project_path "
+            "FROM security_findings s JOIN projects p ON p.id = s.project_id "
+            f"ORDER BY {self._SEVERITY_ORDER}, s.path, s.line LIMIT ?", (limit,))]
+        return {"total": total, "by_severity": by_severity, "by_kind": by_kind, "findings": findings}
 
     def reclaimable_summary(self):
         """
@@ -531,6 +641,71 @@ class Database:
             "estimated_savings": int(env_bytes * ratio),
             "by_ecosystem": by_ecosystem,
         }
+
+    def dependency_intel(self, min_projects=2):
+        """
+        Version-aware dependency analysis -> which projects could safely SHARE one environment (venv / node_modules), and which CONFLICT because they pin different exact versions of the same package.
+
+        Heuristic and deliberately conservative: a conflict is only flagged when two projects pin DIFFERENT EXACT versions of a shared dependency (e.g. flask==2.0 vs flask==3.0) -> those genuinely cannot coexist in one environment. Range / unpinned specs are treated as optimistically compatible (a full PEP 440 / semver solver is out of scope), so "shareable" means "no hard version conflict", not a cast-iron guarantee.
+
+        Sharing an environment is really a Python (venv) / JavaScript (node_modules) concern; Rust and Go already share a global module cache, so their rows are informational.
+
+        Args:
+            min_projects (int): only report ecosystems spanning at least this many projects (default 2).
+
+        Returns:
+            dict: {
+                ecosystems: {
+                    eco: {
+                        project_count: int,
+                        projects: [path, ...],
+                        conflicts: [ {name, pins: {version: [paths]}}, ... ],  # deps with >1 exact pin, worst first
+                        conflicting_projects: [path, ...],   # projects touched by any conflict
+                        shareable_projects: [path, ...],     # the conflict-free remainder
+                        shareable: bool,                     # True -> the whole ecosystem could share one environment
+                    }, ...
+                },  # most projects first
+            }
+        """
+        rows = self.con.execute(
+            "SELECT d.name, COALESCE(d.ecosystem, 'other') AS eco, d.version_spec AS spec, p.path "
+            "FROM dependencies d JOIN projects p ON p.id = d.project_id"
+        ).fetchall()
+
+        ecos = {}   # eco -> {projects:set, deps:{name: {path: spec}}}
+        for r in rows:
+            e = ecos.setdefault(r["eco"], {"projects": set(), "deps": {}})
+            e["projects"].add(r["path"])
+            e["deps"].setdefault(r["name"], {})[r["path"]] = r["spec"]
+
+        out = {}
+        for eco, data in ecos.items():
+            projects = sorted(data["projects"])
+            if len(projects) < min_projects:
+                continue
+            conflicts, conflicting = [], set()
+            for name, per_project in data["deps"].items():
+                pins = {}   # exact version -> [projects pinning it]
+                for path, spec in per_project.items():
+                    v = _pinned_version(spec)
+                    if v is not None:
+                        pins.setdefault(v, []).append(path)
+                if len(pins) >= 2:  # two projects pin different exact versions -> hard conflict
+                    conflicts.append({"name": name,
+                                      "pins": {v: sorted(paths) for v, paths in sorted(pins.items())}})
+                    for paths in pins.values():
+                        conflicting.update(paths)
+            conflicts.sort(key=lambda c: (-len(c["pins"]), c["name"]))
+            out[eco] = {
+                "project_count": len(projects),
+                "projects": projects,
+                "conflicts": conflicts,
+                "conflicting_projects": sorted(conflicting),
+                "shareable_projects": [p for p in projects if p not in conflicting],
+                "shareable": not conflicts,
+            }
+        ecosystems = dict(sorted(out.items(), key=lambda kv: kv[1]["project_count"], reverse=True))
+        return {"ecosystems": ecosystems}
 
     def storage_report(self, limit=10):
         """

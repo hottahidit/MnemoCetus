@@ -51,6 +51,13 @@ CODE_EXTENSIONS = {
 ## -- CLASSIFICATION RESULT --------------------------------------------------------------- ##
 def _result(language, frameworks, category, markers, confidence, metrics=None, dependencies=None, breakdown=None):
     """Build the canonical classification dict. Always returns a dict (never None)."""
+    # dependencies may arrive as a {name: version spec} dict or a plain name iterable.
+    if isinstance(dependencies, dict):
+        specs = {k: (v or "") for k, v in dependencies.items()}
+        names = sorted(dependencies)
+    else:
+        specs = {}
+        names = sorted(dependencies) if dependencies else []
     return {
         "language": language,
         "frameworks": frameworks,
@@ -58,7 +65,8 @@ def _result(language, frameworks, category, markers, confidence, metrics=None, d
         "markers": markers,
         "confidence": round(confidence, 2),
         "metrics": metrics or _empty_metrics(),     # size / file count / dep count
-        "dependencies": sorted(dependencies) if dependencies else [],  # declared package names
+        "dependencies": names,                       # declared package names
+        "dependency_specs": specs,                   # {name: version spec} (v0.5 dependency intelligence)
         "breakdown": breakdown or {"languages": {}, "categories": {}}  # composition shares
     }
 
@@ -97,43 +105,53 @@ def _load_toml(path):
 def _dep_name(spec):
     """Reduce a requirement string (e.g. 'Django>=4.0; extra') to its bare package name."""
     return re.split(r"[<>=!~;[]", spec, maxsplit=1)[0].strip().lower()
+
+def _dep_name_spec(spec):
+    """Split a requirement string ('Django>=4.0,<5 ; python_version>3') into (bare name, version spec)."""
+    spec = spec.split(";", 1)[0].strip()  # drop environment markers
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$", spec)
+    if not m:
+        return _dep_name(spec), ""
+    return m.group(1).lower(), m.group(2).strip()
 ## ---------------------------------------------------------------------------------------- ##
 
 ## -- DEPENDENCIES ------------------------------------------------------------------------ ##
 def _python_dependencies(directory):
-    """Collect declared dependency names from requirements.txt and pyproject.toml."""
-    deps = set()
+    """Collect declared dependency names + version specs from requirements.txt and pyproject.toml -> {name: spec}."""
+    deps = {}
     req = os.path.join(directory, "requirements.txt")
     if os.path.exists(req):
         for line in _safe_read(req).splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                name = _dep_name(line)
+                name, spec = _dep_name_spec(line)
                 if name:
-                    deps.add(name)
+                    deps.setdefault(name, spec)
     data = _load_toml(os.path.join(directory, "pyproject.toml"))
-    for spec in data.get("project", {}).get("dependencies", []) or []:
-        deps.add(_dep_name(spec))
+    for entry in data.get("project", {}).get("dependencies", []) or []:
+        name, spec = _dep_name_spec(entry)
+        if name:
+            deps.setdefault(name, spec)
     poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-    for name in (poetry or {}):
+    for name, constraint in (poetry or {}).items():
         if name.lower() != "python":
-            deps.add(name.lower())
+            deps.setdefault(name.lower(), constraint if isinstance(constraint, str) else "")
     return deps
 
 def _js_dependencies(directory):
-    """Return package.json dict and a set of lowercase dependency names."""
-
+    """Return the package.json dict and {name: version spec} for its (dev)dependencies."""
     data = _load_json(os.path.join(directory, "package.json"))
-    names = set()
+    names = {}
     for key in ("dependencies", "devDependencies"):
         section = data.get(key)
         if isinstance(section, dict):
-            names.update(k.lower() for k in section)
+            for k, v in section.items():
+                names.setdefault(k.lower(), v if isinstance(v, str) else "")
     return data, names
 
 def _go_dependencies(directory):
-    """Return required module paths from go.mod (both single 'require x' lines and require (...) blocks)."""
-    deps = []
+    """Return {module path: version} from go.mod (both single 'require x v' lines and require (...) blocks)."""
+    deps = {}
     in_block = False
     for line in _safe_read(os.path.join(directory, "go.mod")).splitlines():
         line = line.strip()
@@ -143,13 +161,14 @@ def _go_dependencies(directory):
             if line == ")":
                 in_block = False
             else:
-                deps.append(line.split()[0])  # "example.com/m v1.2.3" -> "example.com/m"
+                parts = line.split()  # "example.com/m v1.2.3"
+                deps.setdefault(parts[0], parts[1] if len(parts) > 1 else "")
         elif line.startswith("require ("):
             in_block = True
         elif line.startswith("require "):
             parts = line[len("require "):].split()  # "require example.com/m v1.2.3"
             if parts:
-                deps.append(parts[0])
+                deps.setdefault(parts[0], parts[1] if len(parts) > 1 else "")
     return deps
 
 def _go_dependency_count(directory):

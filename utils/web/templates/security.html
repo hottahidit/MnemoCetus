@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %} - Security{% endblock %}
+{% block content %}
+
+  <h2>Security findings <span class="muted">(MnemoScan)</span></h2>
+  <p class="muted">Hard-coded secrets found in your projects' files (values are <strong>masked</strong> &mdash;
+     MnemoCetus reports them, it never stores the raw value), plus any dependency vulnerabilities from an
+     optional <code>pip-audit</code> / <code>npm audit</code> run. Detection only; nothing is changed.</p>
+
+  {% if not summary or not summary.total %}
+    <p class="muted">No security findings recorded. Secrets are scanned during
+      <strong>Scan + save to database</strong>; run one and reload.</p>
+  {% else %}
+    <div class="cards">
+      <div class="card"><div class="n">{{ summary.total }}</div><div class="l">findings</div></div>
+      {% for sev, n in summary.by_severity.items() %}
+        <div class="card"><div class="n">{{ n }}</div><div class="l">{{ sev }}</div></div>
+      {% endfor %}
+    </div>
+
+    <table>
+      <tr><th>severity</th><th>kind</th><th>rule</th><th>location</th><th>detail</th></tr>
+      {% for f in summary.findings %}
+        <tr>
+          <td>{{ f.severity }}</td>
+          <td>{{ f.kind }}</td>
+          <td>{{ f.rule }}</td>
+          <td class="muted"><code>{{ f.path }}{% if f.line %}:{{ f.line }}{% endif %}</code></td>
+          <td class="muted">{{ f.detail }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+{% endblock %}

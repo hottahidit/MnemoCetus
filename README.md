@@ -43,14 +43,18 @@ Working today:
   and generate **safe, non-destructive cleanup recommendations** with potential savings
 * **Storage analysis** - workspace size rollup plus the largest projects / files / directories,
   backed by a persisted per-project file inventory
-* **Cross-project dependency overlap** - the shared packages across your projects and a rough
-  estimate of the space a shared/hardlinked package store (uv, pnpm) could reclaim
+* **Cross-project dependency intelligence** - the shared packages across your projects, a rough
+  estimate of the space a shared/hardlinked package store (uv, pnpm) could reclaim, and a
+  version-conflict check flagging which projects could share one virtualenv vs. which clash on pins
+* **Security scan** ("MnemoScan") - flag hard-coded secrets (API keys, tokens, private keys; values
+  are masked, never stored raw) during a scan, plus an optional dependency-vulnerability audit that
+  shells out to pip-audit / npm audit when they're installed
 * A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
-  recategorisation, cleanup recommendations, dependency overlap, and storage analysis
+  recategorisation, cleanup recommendations, dependency overlap, storage analysis, and security findings
 
 Planned:
 
-* Security scanning and dependency checks
+* Deeper security scanning (more secret detectors, richer audit integration)
 * Automated organisation suggestions
 
 ---
@@ -59,11 +63,10 @@ Planned:
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-Active development, currently at **v0.4.3**. The classification engine, the SQLite metadata store,
-the low-confidence review / override flow, the reclaimable-space + cleanup-recommendation features,
-cross-project dependency overlap, and storage analysis are all in. (The planned "smarter recognition"
-and "cleanup recommendations" milestones are bundled into the v0.4 release; v0.4.3 adds the storage
-analyser - see the roadmap.)
+Active development, currently at **v0.5**. On top of the v0.4 line (recognition, review/override,
+reclaimable-space + cleanup, dependency overlap, storage analysis), v0.5 adds **dependency
+intelligence** (version-aware conflict / shareable-venv checks) and the **MnemoScan** security layer
+(masked secret detection + an optional pip-audit / npm audit). See the roadmap.
 
 ---
 
@@ -97,10 +100,14 @@ Run the interactive tool:
 python utils/scanner.py
 ```
 
-You get a menu: scan a directory, classify one, resolve relationships, **scan + save to database**,
-**browse the database** (list/search projects, latest scan, reclaimable space, cleanup
-recommendations, dependency overlap, storage analysis), and **review low-confidence projects** (set
-the real type / delete / "yes to all").
+You **scan a directory first** - choosing how nested projects are handled (CLASSIFY / SKIP / MERGE /
+SPLIT, each with an inline description on highlight and a recommended default). The scan (which also
+flags secrets) is **auto-held in a temporary database** until your next scan; you can then **save it
+long-term** to keep it. Once scanned, the rest opens up: **explore this scan** (list/search projects,
+latest scan, reclaimable space, cleanup recommendations, dependency overlap, dependency conflicts,
+storage analysis, security findings), **review low-confidence projects** (set the real type / delete /
+"yes to all"), an optional **dependency vulnerability audit** (pip-audit / npm audit), or **open a
+saved database**.
 
 ### Web dashboard (optional)
 
@@ -108,11 +115,12 @@ the real type / delete / "yes to all").
 python utils/web/app.py        # -> http://127.0.0.1:5000
 ```
 
-Five views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
+Six views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
 space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions),
-**Overlap** (shared dependencies across projects + the space a shared/hardlinked package store could
-reclaim), and **Storage** (largest projects / files / directories). MnemoCetus never deletes anything itself - cleanup is advisory, and the commands are shown
-for you to run.
+**Overlap** (shared dependencies + the space a shared/hardlinked package store could reclaim + a
+version-conflict / shareable-venv check), **Storage** (largest projects / files / directories), and
+**Security** (masked secret findings + dependency vulnerabilities). MnemoCetus never deletes anything
+itself - cleanup is advisory, secrets are masked, and the commands are shown for you to run.
 
 ---
 
@@ -123,7 +131,10 @@ for you to run.
 * v0.3: Metadata storage system (SQLite) + database viewer (+ the OOP scanner refactor folded in)
 * v0.4: Smarter recognition (weighted confidence, composition breakdown, review/override, web
   dashboard) + reclaimable-space marks, safe cleanup recommendations, and cross-project
-  dependency-overlap analysis (+ the scanner split into classifier / cleaner / cli modules)
+  dependency-overlap analysis (+ the scanner split into classifier / cleaner / cli modules;
+  v0.4.x adds the storage analyser)
+* v0.5: Dependency intelligence (version-aware conflict / shareable-venv checks) + the MnemoScan
+  security layer (masked secret detection, optional pip-audit / npm audit)
 * v1.0: Full workspace intelligence platform
 
 Note: the roadmap numbers are actual release versions. `PLAN.md` uses finer-grained planning

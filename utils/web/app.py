@@ -1,11 +1,12 @@
 # Flask web app for MnemoCetus (v0.4 - the browser front-end over the "MnemoIndex" store and "MnemoClean" cleanup).
 #
-# Five views:
+# Six views:
 #   /          -> statistics dashboard (totals, by-language / by-category, confidence spread, reclaimable space)
 #   /projects  -> filterable database viewer with recategorisation, which POSTs into db_manager.set_override / approve / clear_override / delete_project.
 #   /cleanup   -> reclaimable-space cleanup recommendations (advisory only; never deletes anything).
-#   /overlap   -> cross-project dependency overlap + rough env savings from a shared package store.
+#   /overlap   -> cross-project dependency overlap + rough env savings, and the version-conflict / shareable-venv check.
 #   /storage   -> storage analysis (largest projects / files / directories + workspace rollup).
+#   /security  -> MnemoScan findings: hard-coded secrets (masked) and optional dependency vulnerabilities.
 #
 # NOTE: this is a local, single-user tool, so the mutating POST routes don't carry CSRF tokens.
 
@@ -81,6 +82,16 @@ def _overlap(db_path, min_projects=2):
     finally:
         db.close()
 
+def _intel(db_path, min_projects=2):
+    """Version-aware dependency conflict / shareable-venv analysis, or None when there's no database yet."""
+    if not os.path.exists(db_path):
+        return None
+    db = db_manager.Database(db_path)
+    try:
+        return db.dependency_intel(min_projects=min_projects)
+    finally:
+        db.close()
+
 def _storage(db_path, limit=10):
     """Workspace storage analysis (largest projects / files / dirs), or None when there's no database yet."""
     if not os.path.exists(db_path):
@@ -88,6 +99,16 @@ def _storage(db_path, limit=10):
     db = db_manager.Database(db_path)
     try:
         return db.storage_report(limit=limit)
+    finally:
+        db.close()
+
+def _security(db_path):
+    """Workspace MnemoScan rollup (secrets / vulns), or None when there's no database yet."""
+    if not os.path.exists(db_path):
+        return None
+    db = db_manager.Database(db_path)
+    try:
+        return db.security_summary()
     finally:
         db.close()
 
@@ -209,6 +230,7 @@ def create_app(db_path=None):
             "overlap.html",
             db_path=os.path.normpath(current_db()),
             overlap=_overlap(current_db(), min_projects=min_projects),
+            intel=_intel(current_db(), min_projects=min_projects),
             min_projects=min_projects,
         )
 
@@ -218,6 +240,14 @@ def create_app(db_path=None):
             "storage.html",
             db_path=os.path.normpath(current_db()),
             report=_storage(current_db()),
+        )
+
+    @app.route("/security")
+    def security_view():
+        return render_template(
+            "security.html",
+            db_path=os.path.normpath(current_db()),
+            summary=_security(current_db()),
         )
 
     # --- mutations: POST then redirect back (preserving the current filters) -------- #
