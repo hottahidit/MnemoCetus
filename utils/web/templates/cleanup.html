@@ -22,14 +22,14 @@
       <label>hide dirs smaller than
         <input type="number" name="min" min="0" step="1" value="{{ min_mb | int }}"> MB</label>
       <button type="submit">Apply</button>
-      <a href="{{ url_for('cleanup_view') }}">reset</a>
+      <a href="{{ url_for('cleanup_view') }}" class="btn-ghost">Reset</a>
     </form>
 
     <h3>By kind</h3>
     <table>
       <tr><th>kind</th><th>dirs</th><th>savings</th></tr>
       {% for kind, v in recs.by_kind.items() %}
-        <tr><td>{{ kind }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+        <tr><td><span class="tag">{{ kind }}</span></td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
       {% endfor %}
     </table>
 
@@ -39,10 +39,10 @@
       {% for it in recs['items'] %}
         <tr>
           <td><code>{{ it.path }}</code></td>
-          <td>{{ it.kind }}</td>
+          <td><span class="tag">{{ it.kind }}</span></td>
           <td>{{ it.size_bytes | humansize }}</td>
           <td class="muted">{{ it.reason }}</td>
-          <td><code>{{ it.command }}</code></td>
+          <td><code class="copyable">{{ it.command }}</code></td>
         </tr>
       {% endfor %}
     </table>

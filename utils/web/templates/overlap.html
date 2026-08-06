@@ -28,7 +28,7 @@
     <table>
       <tr><th>ecosystem</th><th>distinct deps</th><th>installed total</th><th>projects</th></tr>
       {% for eco, v in overlap.by_ecosystem.items() %}
-        <tr><td>{{ eco }}</td><td>{{ v.distinct }}</td><td>{{ v.instances }}</td><td>{{ v.projects }}</td></tr>
+        <tr><td><span class="tag">{{ eco }}</span></td><td>{{ v.distinct }}</td><td>{{ v.instances }}</td><td>{{ v.projects }}</td></tr>
       {% endfor %}
     </table>
 
@@ -49,7 +49,7 @@
         {% for d in overlap.shared %}
           <tr>
             <td><code>{{ d.name }}</code></td>
-            <td>{{ d.ecosystem }}</td>
+            <td><span class="tag">{{ d.ecosystem }}</span></td>
             <td>{{ d.project_count }}</td>
             <td class="muted">{{ d.projects | join(', ') }}</td>
           </tr>

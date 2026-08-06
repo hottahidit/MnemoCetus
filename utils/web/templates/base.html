@@ -5,48 +5,251 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MnemoCetus{% block title %}{% endblock %}</title>
   <style>
-    :root { --line:#e5e7eb; --muted:#6b7280; --ink:#1b2430; --accent:#0e7490; --bg:#f9fafb; }
-    * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; color: var(--ink); }
-    header { padding: 1rem 2rem; border-bottom: 1px solid var(--line); display: flex;
-             align-items: baseline; gap: 1.5rem; flex-wrap: wrap; }
-    header h1 { margin: 0; font-size: 1.3rem; }
-    nav a { margin-right: 1rem; text-decoration: none; color: var(--accent); font-weight: 600; }
-    nav a:hover { text-decoration: underline; }
-    main { padding: 1.5rem 2rem; }
-    .muted { color: var(--muted); }
-    code { background: #f3f4f6; padding: 0 .3rem; border-radius: 3px; }
-    .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-    .card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1.1rem; min-width: 9rem; }
-    .card .n { font-size: 1.6rem; font-weight: 700; }
-    .card .l { color: var(--muted); font-size: .85rem; }
-    .grid { display: flex; gap: 2rem; flex-wrap: wrap; }
-    table { border-collapse: collapse; margin-top: .4rem; }
-    th, td { border: 1px solid var(--line); padding: .35rem .7rem; text-align: left; vertical-align: top; }
-    th { background: var(--bg); }
-    .bar { height: .5rem; background: var(--accent); border-radius: 3px; display: inline-block; }
-    form.filters { margin: .5rem 0 1rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
-    form.filters input, form.filters select { padding: .3rem; }
-    .tag { font-size: .72rem; padding: .05rem .4rem; border-radius: 10px; background: #ecfeff;
-           color: var(--accent); border: 1px solid #a5f3fc; }
-    .row-form { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
-    .row-form select, .row-form input { padding: .25rem; }
-    button { padding: .25rem .6rem; cursor: pointer; }
+    :root {
+      --bg:#f5f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#e3e8ef;
+      --text:#0f1a26; --muted:#5b6b7d; --accent:#0891b2; --accent-2:#0e7490;
+      --accent-soft:#e0f6fb; --ring:rgba(8,145,178,.28);
+      --high:#dc2626; --medium:#d97706; --low:#6b7280; --good:#16a34a;
+      --shadow:0 1px 2px rgba(16,24,40,.05),0 6px 16px rgba(16,24,40,.06);
+      --radius:12px;
+    }
+    /* dark values: the media query covers the OS setting (unless the toggle forced light);
+       the [data-theme="dark"] scope covers the manual toggle and wins either way. */
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg:#0b0f16; --surface:#141b24; --surface-2:#1c2531; --border:#28323f;
+        --text:#e6edf3; --muted:#93a1b1; --accent:#22d3ee; --accent-2:#67e8f9;
+        --accent-soft:#0e2a33; --ring:rgba(34,211,238,.28);
+        --high:#f87171; --medium:#fbbf24; --low:#94a3b8; --good:#4ade80;
+        --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 24px rgba(0,0,0,.35);
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg:#0b0f16; --surface:#141b24; --surface-2:#1c2531; --border:#28323f;
+      --text:#e6edf3; --muted:#93a1b1; --accent:#22d3ee; --accent-2:#67e8f9;
+      --accent-soft:#0e2a33; --ring:rgba(34,211,238,.28);
+      --high:#f87171; --medium:#fbbf24; --low:#94a3b8; --good:#4ade80;
+      --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 24px rgba(0,0,0,.35);
+    }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body {
+      margin:0; color:var(--text); background:
+        radial-gradient(1200px 400px at 100% -10%, var(--accent-soft), transparent 60%) var(--bg);
+      background-attachment:fixed;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      line-height:1.55; -webkit-font-smoothing:antialiased;
+    }
+    a { color:var(--accent-2); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+
+    /* --- top bar --- */
+    header {
+      position:sticky; top:0; z-index:20;
+      display:flex; align-items:center; gap:1.25rem; flex-wrap:wrap;
+      padding:.7rem 1.5rem;
+      background:rgba(127,127,127,.06);
+      backdrop-filter:saturate(1.4) blur(10px);
+      border-bottom:1px solid var(--border);
+    }
+    .brand { display:flex; align-items:center; gap:.5rem; font-weight:800; font-size:1.15rem; letter-spacing:-.01em; }
+    .brand .logo { font-size:1.35rem; }
+    nav { display:flex; gap:.2rem; flex-wrap:wrap; }
+    nav a {
+      padding:.4rem .8rem; border-radius:8px; color:var(--muted);
+      font-weight:600; font-size:.9rem; transition:background .15s, color .15s;
+    }
+    nav a:hover { background:var(--surface-2); color:var(--text); text-decoration:none; }
+    nav a.active { background:var(--accent-soft); color:var(--accent-2); }
+    header .db { margin-left:auto; color:var(--muted); font-size:.78rem; }
+    #theme-toggle {
+      background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+      width:2rem; height:2rem; border-radius:8px; padding:0; font-size:1rem; line-height:1; cursor:pointer;
+    }
+    #theme-toggle:hover { border-color:var(--accent); filter:none; }
+    th[data-asc] { cursor:pointer; }
+
+    main { max-width:1120px; margin:0 auto; padding:1.75rem 1.5rem 4rem; }
+    h2 { font-size:1.55rem; letter-spacing:-.02em; margin:.25rem 0 .35rem; }
+    h3 { font-size:1.05rem; margin:1.9rem 0 .5rem; letter-spacing:-.01em; }
+    p { margin:.35rem 0 1rem; max-width:70ch; }
+    .muted { color:var(--muted); }
+    strong { font-weight:700; }
+    code { background:var(--surface-2); padding:.1rem .35rem; border-radius:5px; font-size:.86em;
+           font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+
+    /* --- stat cards --- */
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1rem; margin:1.25rem 0 1.75rem; }
+    .card {
+      background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+      padding:1rem 1.15rem; box-shadow:var(--shadow); position:relative; overflow:hidden;
+    }
+    .card::before { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:var(--accent); }
+    .card .n { font-size:1.75rem; font-weight:800; letter-spacing:-.02em; line-height:1.1; }
+    .card .l { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; margin-top:.3rem; }
+
+    .grid { display:flex; gap:2rem; flex-wrap:wrap; }
+    .grid > * { min-width:0; }
+
+    /* --- tables (work on bare <table><tr><th>… markup, no thead needed) --- */
+    table {
+      border-collapse:separate; border-spacing:0; width:100%; font-size:.9rem;
+      background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+      overflow:hidden; box-shadow:var(--shadow); margin:.5rem 0 1.5rem;
+    }
+    th, td { padding:.6rem .85rem; text-align:left; vertical-align:top; border-bottom:1px solid var(--border); }
+    th { background:var(--surface-2); color:var(--muted); font-size:.72rem; font-weight:700;
+         text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }
+    tr:last-child td { border-bottom:none; }
+    tr:nth-child(even) td { background:rgba(127,127,127,.04); }
+    tr:hover td { background:var(--accent-soft); }
+    td code { background:transparent; padding:0; }
+
+    /* --- badges / pills --- */
+    .tag, .badge {
+      display:inline-block; font-size:.7rem; font-weight:700; padding:.14rem .55rem; border-radius:999px;
+      background:var(--accent-soft); color:var(--accent-2); text-transform:uppercase; letter-spacing:.04em;
+    }
+    .badge.high   { background:color-mix(in srgb,var(--high) 16%,transparent);   color:var(--high); }
+    .badge.medium { background:color-mix(in srgb,var(--medium) 18%,transparent); color:var(--medium); }
+    .badge.low    { background:var(--surface-2); color:var(--muted); }
+
+    .bar { height:.5rem; background:linear-gradient(90deg,var(--accent),var(--accent-2));
+           border-radius:999px; display:inline-block; min-width:2px; }
+
+    /* --- forms / buttons --- */
+    form.filters {
+      display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; margin:.75rem 0 1.25rem;
+      background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+      padding:.75rem 1rem; box-shadow:var(--shadow);
+    }
+    input, select {
+      padding:.4rem .6rem; border:1px solid var(--border); border-radius:8px;
+      background:var(--surface); color:var(--text); font:inherit;
+    }
+    input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--ring); }
+    button {
+      padding:.42rem .9rem; border:1px solid transparent; background:var(--accent); color:#fff;
+      border-radius:8px; font-weight:600; font:inherit; cursor:pointer; transition:filter .15s;
+    }
+    button:hover { filter:brightness(1.08); }
+    /* secondary / "ghost" button - used for Reset so it reads as an action, not a link */
+    .btn-ghost {
+      display:inline-block; padding:.42rem .9rem; border-radius:8px; font-weight:600; font:inherit;
+      background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+      cursor:pointer; text-decoration:none; transition:background .15s, border-color .15s;
+    }
+    .btn-ghost:hover { background:var(--surface); border-color:var(--accent); color:var(--accent-2); text-decoration:none; }
+    .row-form { display:flex; gap:.35rem; flex-wrap:wrap; align-items:center; }
+    .row-form select, .row-form input { padding:.28rem .4rem; }
+    label { color:var(--muted); font-size:.88rem; }
+
+    /* --- charts: validated categorical + status palette, self-contained (no CDN) --- */
+    :root {
+      --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a; --series-4:#eda100;
+      --series-5:#e87ba4; --series-6:#008300; --series-7:#4a3aa7; --series-8:#e34948;
+      --status-good:#0ca30c; --status-warn:#fab219; --status-crit:#d03b3b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500;
+        --series-5:#d55181; --series-6:#008300; --series-7:#9085e9; --series-8:#e66767;
+      }
+    }
+    :root[data-theme="dark"] {
+      --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500;
+      --series-5:#d55181; --series-6:#008300; --series-7:#9085e9; --series-8:#e66767;
+    }
+    .chart { display:flex; flex-direction:column; gap:.55rem; margin:.4rem 0 1.5rem; }
+    .chart-row { display:grid; grid-template-columns:8rem 1fr auto; gap:.7rem; align-items:center; font-size:.85rem; }
+    .chart-row .k { color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .chart-track { background:var(--surface-2); border-radius:999px; height:.7rem; overflow:hidden; }
+    .chart-fill { height:100%; border-radius:999px; background:var(--c,var(--accent)); min-width:3px; transition:width .3s; }
+    .chart-row .v { font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; }
+    .donut-wrap { display:flex; gap:1.35rem; align-items:center; flex-wrap:wrap; margin:.4rem 0 1.5rem; }
+    .donut { width:132px; height:132px; border-radius:50%; flex:none;
+             -webkit-mask:radial-gradient(farthest-side, transparent 58%, #000 59%);
+                     mask:radial-gradient(farthest-side, transparent 58%, #000 59%); }
+    .legend { display:flex; flex-direction:column; gap:.4rem; font-size:.85rem; }
+    .legend .row { display:inline-flex; align-items:center; gap:.5rem; }
+    .legend .v { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .swatch { width:.8rem; height:.8rem; border-radius:3px; background:var(--c,var(--accent)); flex:none; }
   </style>
 </head>
 <body>
   <header>
-    <h1>&#128051; MnemoCetus</h1>
+    <span class="brand"><span class="logo">&#128051;</span> MnemoCetus</span>
     <nav>
-      <a href="{{ url_for('index') }}">Dashboard</a>
-      <a href="{{ url_for('projects_view') }}">Projects</a>
-      <a href="{{ url_for('cleanup_view') }}">Cleanup</a>
-      <a href="{{ url_for('overlap_view') }}">Overlap</a>
-      <a href="{{ url_for('storage_view') }}">Storage</a>
-      <a href="{{ url_for('security_view') }}">Security</a>
+      <a href="{{ url_for('index') }}"{% if request.endpoint == 'index' %} class="active"{% endif %}>Dashboard</a>
+      <a href="{{ url_for('projects_view') }}"{% if request.endpoint == 'projects_view' %} class="active"{% endif %}>Projects</a>
+      <a href="{{ url_for('cleanup_view') }}"{% if request.endpoint == 'cleanup_view' %} class="active"{% endif %}>Cleanup</a>
+      <a href="{{ url_for('overlap_view') }}"{% if request.endpoint == 'overlap_view' %} class="active"{% endif %}>Overlap</a>
+      <a href="{{ url_for('storage_view') }}"{% if request.endpoint == 'storage_view' %} class="active"{% endif %}>Storage</a>
+      <a href="{{ url_for('security_view') }}"{% if request.endpoint == 'security_view' %} class="active"{% endif %}>Security</a>
     </nav>
-    <span class="muted">database: <code>{{ db_path }}</code></span>
+    <span class="db">database: <code>{{ db_path }}</code></span>
+    <button id="theme-toggle" title="Toggle light / dark" aria-label="Toggle theme">&#9790;</button>
   </header>
   <main>{% block content %}{% endblock %}</main>
+  <script>
+  (function () {
+    var root = document.documentElement;
+    var saved = localStorage.getItem("mc-theme");
+    if (saved) root.setAttribute("data-theme", saved);
+    function current() {
+      return root.getAttribute("data-theme")
+        || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    }
+    var btn = document.getElementById("theme-toggle");
+    function paint() { if (btn) btn.innerHTML = current() === "dark" ? "&#9728;" : "&#9790;"; }
+    paint();
+    if (btn) btn.addEventListener("click", function () {
+      var next = current() === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      localStorage.setItem("mc-theme", next);
+      paint();
+    });
+
+    // click a column header to sort the rows below it; click again to reverse
+    document.querySelectorAll("table").forEach(function (tbl) {
+      var head = tbl.rows[0];
+      if (!head) return;
+      var body = tbl.tBodies[0] || tbl;
+      Array.from(head.cells).forEach(function (th, i) {
+        if (th.tagName !== "TH") return;
+        th.setAttribute("data-asc", "false");
+        th.title = "Sort";
+        th.addEventListener("click", function () {
+          var rows = Array.from(tbl.rows).slice(1);
+          var asc = th.getAttribute("data-asc") !== "true";
+          rows.sort(function (a, b) {
+            var x = (a.cells[i] ? a.cells[i].innerText : "").trim();
+            var y = (b.cells[i] ? b.cells[i].innerText : "").trim();
+            var nx = parseFloat(x.replace(/[^0-9.\-]/g, ""));
+            var ny = parseFloat(y.replace(/[^0-9.\-]/g, ""));
+            var c = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+            return asc ? c : -c;
+          });
+          rows.forEach(function (r) { body.appendChild(r); });
+          th.setAttribute("data-asc", asc);
+        });
+      });
+    });
+
+    // click a copyable command to copy it to the clipboard
+    document.querySelectorAll("code.copyable").forEach(function (el) {
+      el.style.cursor = "pointer";
+      el.title = "Click to copy";
+      el.addEventListener("click", function () {
+        if (!navigator.clipboard) return;
+        var original = el.textContent;
+        navigator.clipboard.writeText(original).then(function () {
+          el.textContent = "copied ✓";
+          setTimeout(function () { el.textContent = original; }, 900);
+        });
+      });
+    });
+  })();
+  </script>
 </body>
 </html>

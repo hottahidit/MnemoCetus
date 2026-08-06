@@ -41,6 +41,10 @@ Working today:
   overrides survive re-scans
 * Flag **reclaimable space** ("marks") - regenerable bloat like node_modules / venv / build output -
   and generate **safe, non-destructive cleanup recommendations** with potential savings
+* **Reclaimer** (opt-in, the one action that changes your disk) - actually delete selected bloat
+  (venvs / caches / build output / node_modules) and optionally build one shared **uni-venv**, after a
+  dry-run plan and a typed confirmation. It is guarded to only ever touch curated bloat directories
+  inside the scanned workspace, and never follows symlinks
 * **Storage analysis** - workspace size rollup plus the largest projects / files / directories,
   backed by a persisted per-project file inventory
 * **Cross-project dependency intelligence** - the shared packages across your projects, a rough
@@ -103,11 +107,14 @@ python utils/scanner.py
 You **scan a directory first** - choosing how nested projects are handled (CLASSIFY / SKIP / MERGE /
 SPLIT, each with an inline description on highlight and a recommended default). The scan (which also
 flags secrets) is **auto-held in a temporary database** until your next scan; you can then **save it
-long-term** to keep it. Once scanned, the rest opens up: **explore this scan** (list/search projects,
+long-term** - tick which projects to keep, and they're **merged** into the database (it accumulates
+across scans and keeps projects nested inside one another consistent). Once scanned, the rest opens
+up: **explore this scan** (list/search projects,
 latest scan, reclaimable space, cleanup recommendations, dependency overlap, dependency conflicts,
 storage analysis, security findings), **review low-confidence projects** (set the real type / delete /
-"yes to all"), an optional **dependency vulnerability audit** (pip-audit / npm audit), or **open a
-saved database**.
+"yes to all"), an optional **dependency vulnerability audit** (pip-audit / npm audit), the **Reclaimer**
+(delete selected bloat / build a uni-venv), or **open a saved database**. Launching the CLI also brings
+up the web dashboard in the background (best-effort) so both are usable at once.
 
 ### Web dashboard (optional)
 
@@ -119,8 +126,35 @@ Six views: the **Dashboard** (totals, by-language / by-category, confidence spre
 space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions),
 **Overlap** (shared dependencies + the space a shared/hardlinked package store could reclaim + a
 version-conflict / shareable-venv check), **Storage** (largest projects / files / directories), and
-**Security** (masked secret findings + dependency vulnerabilities). MnemoCetus never deletes anything
-itself - cleanup is advisory, secrets are masked, and the commands are shown for you to run.
+**Security** (masked secret findings + dependency vulnerabilities). The web dashboard and the advisory
+Cleanup view never delete anything - they only suggest. The one place deletion happens is the opt-in
+**Reclaimer** in the CLI, which shows a full plan and requires a typed confirmation first.
+
+---
+
+## Configuration
+
+MnemoCetus runs out of the box; these are the knobs if you want them.
+
+**Exclude lists.** Scans filter out junk directories using the shipped
+`utils/exclude_list/default_exclude_list.txt`. To customise without editing that file, create
+`utils/exclude_list/custom_exclude_list.txt` (one entry per line - a bare name like `node_modules`
+matches anywhere in the tree; an entry containing a slash matches that exact path or anything under
+it). When present, the custom list is used in place of the default. You can also skip filtering
+entirely for a single scan via the "Apply exclude filters?" prompt.
+
+**Databases.** There are two stores:
+
+* A **temporary** session database in your system temp directory holds the scan you just ran, and is
+  overwritten on your next scan.
+* The **long-term** database is `mnemocetus.db` in the repo root. "Save this scan long-term" merges the
+  projects you tick into it (accumulating across scans, upserting by path so nothing duplicates);
+  "Open a saved database" (CLI) or `python utils/web/app.py` (web) reads from it.
+
+**Security scanning.** The secret scan runs as part of a scan - toggle it at the "Scan for hard-coded
+secrets?" prompt. Detected secrets are stored **masked**, never the raw value. The dependency
+vulnerability audit is opt-in and shells out to `pip-audit` / `npm audit` only if they're installed,
+doing nothing otherwise.
 
 ---
 

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %} - Project{% endblock %}
+{% block content %}
+
+  {% if not detail %}
+    <h2>Project not found</h2>
+    <p class="muted">No project at that path in the current database.
+      <a href="{{ url_for('projects_view') }}">Back to projects &rarr;</a></p>
+  {% else %}
+    {% set p = detail.project %}
+    <p class="muted"><a href="{{ url_for('projects_view') }}">&larr; all projects</a></p>
+    <h2><code>{{ p.path }}</code></h2>
+    <p>
+      <span class="tag">{{ p.language or '?' }}</span>
+      <span class="tag">{{ p.category or '?' }}</span>
+      {% if p.user_confirmed %}<span class="badge low">user-confirmed</span>{% endif %}
+    </p>
+
+    <div class="cards">
+      <div class="card"><div class="n">{{ '%.2f' | format(p.confidence) }}</div><div class="l">confidence</div></div>
+      <div class="card"><div class="n">{{ p.file_count }}</div><div class="l">files</div></div>
+      <div class="card"><div class="n">{{ p.size_bytes | humansize }}</div><div class="l">size</div></div>
+      <div class="card"><div class="n">{{ p.dependency_count }}</div><div class="l">dependencies</div></div>
+      {% if p.reclaimable_bytes %}
+        <div class="card"><div class="n">{{ p.reclaimable_bytes | humansize }}</div><div class="l">reclaimable</div></div>
+      {% endif %}
+    </div>
+
+    <table>
+      <tr><th>frameworks</th><td>{{ p.frameworks | join(', ') or '—' }}</td></tr>
+      <tr><th>role</th><td>{{ p.role or '—' }}</td></tr>
+      <tr><th>parent</th><td>
+        {% if p.parent_path %}<a href="{{ url_for('project_view', path=p.parent_path) }}"><code>{{ p.parent_path }}</code></a>
+        {% else %}&mdash; (root){% endif %}</td></tr>
+      <tr><th>first seen</th><td class="muted">{{ p.first_seen }}</td></tr>
+      <tr><th>updated</th><td class="muted">{{ p.updated_at }}</td></tr>
+    </table>
+
+    <h3>Dependencies <span class="muted">({{ detail.dependencies | length }})</span></h3>
+    {% if detail.dependencies %}
+      <table>
+        <tr><th>name</th><th>version spec</th></tr>
+        {% for d in detail.dependencies %}
+          <tr><td>{{ d.name }}</td><td class="muted"><code>{{ d.version_spec or 'any' }}</code></td></tr>
+        {% endfor %}
+      </table>
+    {% else %}<p class="muted">None recorded.</p>{% endif %}
+
+    <h3>Reclaimable <span class="muted">({{ detail.marks | length }})</span></h3>
+    {% if detail.marks %}
+      <table>
+        <tr><th>kind</th><th>directory</th><th>size</th></tr>
+        {% for m in detail.marks %}
+          <tr><td><span class="tag">{{ m.kind }}</span></td><td><code>{{ m.path }}</code></td><td>{{ m.size_bytes | humansize }}</td></tr>
+        {% endfor %}
+      </table>
+    {% else %}<p class="muted">No regenerable bloat.</p>{% endif %}
+
+    <h3>Security findings <span class="muted">({{ detail.findings | length }})</span></h3>
+    {% if detail.findings %}
+      <table>
+        <tr><th>severity</th><th>rule</th><th>location</th><th>detail</th></tr>
+        {% for f in detail.findings %}
+          <tr>
+            <td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td>
+            <td>{{ f.rule }}</td>
+            <td class="muted"><code>{{ f.path }}{% if f.line %}:{{ f.line }}{% endif %}</code></td>
+            <td class="muted">{{ f.detail }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}<p class="muted">Clean.</p>{% endif %}
+  {% endif %}
+
+{% endblock %}

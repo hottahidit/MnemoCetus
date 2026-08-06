@@ -112,6 +112,24 @@ def _security(db_path):
     finally:
         db.close()
 
+def _project_detail(db_path, path):
+    """Everything about one project (deps + marks + security findings), or None if it isn't in the db."""
+    if not os.path.exists(db_path):
+        return None
+    db = db_manager.Database(db_path)
+    try:
+        project = db.get_project(path)
+        if project is None:
+            return None
+        return {
+            "project": project,
+            "dependencies": db.get_dependencies(project["id"]),
+            "marks": db.get_marks(project["id"]),
+            "findings": db.get_security_findings(project["id"]),
+        }
+    finally:
+        db.close()
+
 def _dashboard_stats(projects):
     """Roll the project list up into the numbers the dashboard shows."""
     by_language, by_category = {}, {}
@@ -248,6 +266,15 @@ def create_app(db_path=None):
             "security.html",
             db_path=os.path.normpath(current_db()),
             summary=_security(current_db()),
+        )
+
+    @app.route("/project")
+    def project_view():
+        # ?path= -> the full detail for a single project (linked from the Projects table).
+        return render_template(
+            "project.html",
+            db_path=os.path.normpath(current_db()),
+            detail=_project_detail(current_db(), request.args.get("path", "")),
         )
 
     # --- mutations: POST then redirect back (preserving the current filters) -------- #
