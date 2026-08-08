@@ -32,7 +32,10 @@ def _safe_to_delete(path, workspace_root):
         return False, "not a recognised reclaimable directory"
     real = os.path.realpath(path)
     root = os.path.realpath(workspace_root)
-    if real != root and not real.startswith(root + os.sep):
+    if real == root:
+        # Refuse the scanned root itself -> e.g. a workspace literally named 'node_modules' would otherwise pass the marker check and delete the whole tree.
+        return False, "is the workspace root itself (refusing to delete it)"
+    if not real.startswith(root + os.sep):
         return False, "resolves outside the scanned workspace"
     return True, ""
 
@@ -77,6 +80,10 @@ def create_uni_venv(venv_path, dependencies=()):
     Returns:
         dict: {created: bool, path: str, installed: int, failed: [name,...], error: str|None}
     """
+    if os.path.isdir(venv_path) and os.listdir(venv_path):
+        # Never build over an existing non-empty directory -> refuse rather than risk clobbering a real venv or project.
+        return {"created": False, "path": venv_path, "installed": 0, "failed": [],
+                "error": "target already exists and is not empty"}
     try:
         subprocess.run([sys.executable, "-m", "venv", venv_path],
                        check=True, capture_output=True, text=True, timeout=300)

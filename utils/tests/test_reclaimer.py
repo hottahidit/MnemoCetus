@@ -68,6 +68,18 @@ class TestSafeToDelete(ReclaimTestCase):
         ok, _ = reclaimer._safe_to_delete(os.path.join(self.proj, "gone"), self.ws)
         self.assertFalse(ok)
 
+    def test_workspace_root_itself_refused(self):
+        # A workspace whose own basename is a marker must not be deletable as its own root.
+        root = tempfile.mkdtemp()
+        marker_root = os.path.join(root, "node_modules")
+        os.makedirs(marker_root)
+        try:
+            ok, reason = reclaimer._safe_to_delete(marker_root, marker_root)
+            self.assertFalse(ok)
+            self.assertIn("root", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class TestExecuteReclaim(ReclaimTestCase):
     def test_deletes_markers_only(self):
@@ -104,6 +116,20 @@ class TestCreateUniVenv(unittest.TestCase):
             self.assertTrue(v["created"])
             self.assertTrue(any(os.path.exists(os.path.join(ws, ".uni-venv", "bin", b))
                                 for b in ("python", "python3")))
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+
+    def test_refuses_nonempty_target(self):
+        ws = tempfile.mkdtemp()
+        try:
+            target = os.path.join(ws, "existing")
+            os.makedirs(target)
+            with open(os.path.join(target, "keep"), "w") as f:
+                f.write("x")
+            v = reclaimer.create_uni_venv(target)
+            self.assertFalse(v["created"])
+            self.assertIn("exists", v["error"])
+            self.assertTrue(os.path.exists(os.path.join(target, "keep")))  # left untouched
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 
