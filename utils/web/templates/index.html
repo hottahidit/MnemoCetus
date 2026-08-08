@@ -3,8 +3,8 @@
 {% block content %}
 
   {% if not stats %}
-    <p>No projects yet. Run a scan first:
-       <code>python utils/scanner.py</code> &rarr; &ldquo;Scan + save to database&rdquo;.</p>
+    <p>No projects yet. Run a scan first: <code>python utils/scanner.py</code> &rarr;
+       scan a directory, then <strong>Save this scan long-term</strong>.</p>
   {% else %}
     <div class="cards">
       <div class="card"><div class="n">{{ stats.project_count }}</div><div class="l">projects</div></div>
@@ -24,39 +24,57 @@
 
     <div class="grid">
       <div>
-        <h2>By language</h2>
-        <table>
-          <tr><th>language</th><th>projects</th><th>size</th></tr>
-          {% for lang, v in stats.by_language.items() %}
-            <tr><td>{{ lang }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
-          {% endfor %}
-        </table>
+        <h2>Language mix</h2>
+        {% set lang_total = stats.by_language.values() | map(attribute='count') | sum %}
+        <div class="donut-wrap">
+          <div class="donut" style="background: conic-gradient(
+            {%- set ns = namespace(acc=0) -%}
+            {%- for lang, v in stats.by_language.items() -%}
+              var(--series-{{ (loop.index0 % 8) + 1 }}) {{ (ns.acc / lang_total * 100) | round(2) }}% {{ ((ns.acc + v.count) / lang_total * 100) | round(2) }}%{{ ',' if not loop.last }}
+              {%- set ns.acc = ns.acc + v.count -%}
+            {%- endfor -%}
+          );"></div>
+          <div class="legend">
+            {% for lang, v in stats.by_language.items() %}
+              <span class="row"><span class="swatch" style="--c:var(--series-{{ (loop.index0 % 8) + 1 }})"></span>
+                {{ lang }} <span class="v">{{ v.count }} &middot; {{ v.bytes | humansize }}</span></span>
+            {% endfor %}
+          </div>
+        </div>
       </div>
 
       <div>
-        <h2>By category</h2>
-        <table>
-          <tr><th>category</th><th>projects</th><th>size</th></tr>
+        <h2>By category <span class="muted">(size)</span></h2>
+        {% set cat_max = stats.by_category.values() | map(attribute='bytes') | max %}
+        <div class="chart">
           {% for cat, v in stats.by_category.items() %}
-            <tr><td>{{ cat }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+            <div class="chart-row">
+              <span class="k">{{ cat }}</span>
+              <div class="chart-track"><div class="chart-fill"
+                   style="width:{{ (v.bytes / cat_max * 100) if cat_max else 0 }}%; --c:var(--series-{{ (loop.index0 % 8) + 1 }})"></div></div>
+              <span class="v">{{ v.count }} &middot; {{ v.bytes | humansize }}</span>
+            </div>
           {% endfor %}
-        </table>
-      </div>
-
-      <div>
-        <h2>Confidence</h2>
-        <table>
-          <tr><th>band</th><th>projects</th></tr>
-          {% for band, n in stats.confidence.items() %}
-            <tr><td>{{ band }}</td><td>{{ n }}</td></tr>
-          {% endfor %}
-        </table>
-        {% if stats.confidence['low (<0.6)'] %}
-          <p class="muted"><a href="{{ url_for('projects_view', uncertain='1') }}">Review the
-            {{ stats.confidence['low (<0.6)'] }} low-confidence project(s) &rarr;</a></p>
-        {% endif %}
+        </div>
       </div>
     </div>
+
+    <h2>Confidence</h2>
+    {% set conf_max = stats.confidence.values() | max %}
+    <div class="chart" style="max-width:640px">
+      {% for band, n in stats.confidence.items() %}
+        <div class="chart-row">
+          <span class="k">{{ band }}</span>
+          <div class="chart-track"><div class="chart-fill"
+               style="width:{{ (n / conf_max * 100) if conf_max else 0 }}%; --c:var({{ '--status-crit' if 'low' in band else ('--status-warn' if 'medium' in band else '--status-good') }})"></div></div>
+          <span class="v">{{ n }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% if stats.confidence['low (<0.6)'] %}
+      <p class="muted"><a href="{{ url_for('projects_view', uncertain='1') }}">Review the
+        {{ stats.confidence['low (<0.6)'] }} low-confidence project(s) &rarr;</a></p>
+    {% endif %}
 
     {% if reclaimable and reclaimable.total_bytes %}
     <h2>Reclaimable space <span class="muted">({{ reclaimable.total_bytes | humansize }} of regenerable bloat)</span></h2>
@@ -66,12 +84,17 @@
     <div class="grid">
       <div>
         <h3>By kind</h3>
-        <table>
-          <tr><th>kind</th><th>dirs</th><th>size</th></tr>
+        {% set kind_max = reclaimable.by_kind.values() | map(attribute='bytes') | max %}
+        <div class="chart">
           {% for kind, v in reclaimable.by_kind.items() %}
-            <tr><td>{{ kind }}</td><td>{{ v.count }}</td><td>{{ v.bytes | humansize }}</td></tr>
+            <div class="chart-row">
+              <span class="k">{{ kind }}</span>
+              <div class="chart-track"><div class="chart-fill"
+                   style="width:{{ (v.bytes / kind_max * 100) if kind_max else 0 }}%; --c:var(--series-{{ (loop.index0 % 8) + 1 }})"></div></div>
+              <span class="v">{{ v.count }} &middot; {{ v.bytes | humansize }}</span>
+            </div>
           {% endfor %}
-        </table>
+        </div>
       </div>
       <div>
         <h3>Heaviest projects</h3>

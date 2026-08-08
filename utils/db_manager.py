@@ -378,6 +378,81 @@ class Database:
               f.get("path"), f.get("line", 0), f.get("detail")) for f in findings],
         )
         self.con.commit()
+
+    def merge_from(self, src_db_path, only_paths=None):
+        """
+        Merge projects from another database file into this one, upserting by path.
+
+        Each project (optionally filtered to only_paths) is upserted -> existing rows refresh, new ones are added, nothing duplicates. Its dependencies, files, marks and security findings come across too, and afterwards relationships are recomputed so a project nested inside another saved project links up correctly.
+
+        Args:
+            src_db_path (str): the database to pull projects from (e.g. a temporary session db).
+            only_paths (set | None): if given, only merge projects whose path is in this set.
+
+        Returns:
+            int: how many projects were merged.
+        """
+        src = Database(src_db_path)
+        try:
+            merged = 0
+            for row in src.con.execute("SELECT * FROM projects").fetchall():
+                if only_paths is not None and row["path"] not in only_paths:
+                    continue
+                src_pid = row["id"]
+                pid = self.upsert_project({
+                    "path": row["path"], "language": row["language"], "category": row["category"],
+                    "confidence": row["confidence"],
+                    "frameworks": _loads(row["frameworks"]), "markers": _loads(row["markers"]),
+                    "breakdown": _loads_breakdown(row["breakdown"]),
+                    "metrics": {"file_count": row["file_count"], "size_bytes": row["size_bytes"],
+                                "dependency_count": row["dependency_count"]},
+                    "parent_path": row["parent_path"], "role": row["role"],
+                    "is_symlink": bool(row["is_symlink"]), "symlink_target": row["symlink_target"],
+                    "reclaimable_bytes": row["reclaimable_bytes"],
+                })
+                deps = src.con.execute(
+                    "SELECT name, ecosystem, version_spec FROM dependencies WHERE project_id = ?", (src_pid,)).fetchall()
+                self.save_dependencies(pid, [d["name"] for d in deps],
+                                       ecosystem=(deps[0]["ecosystem"] if deps else None),
+                                       specs={d["name"]: d["version_spec"] for d in deps})
+                self.save_files(pid, [(f["path"], f["size_bytes"]) for f in src.con.execute(
+                    "SELECT path, size_bytes FROM files WHERE project_id = ?", (src_pid,))])
+                self.save_marks(pid, [dict(m) for m in src.con.execute(
+                    "SELECT kind, name, path, size_bytes, file_count, reason FROM marks WHERE project_id = ?", (src_pid,))])
+                self.save_security_findings(pid, [dict(s) for s in src.con.execute(
+                    "SELECT kind, rule, severity, path, line, detail FROM security_findings WHERE project_id = ?", (src_pid,))])
+                if row["user_confirmed"]:  # carry the user's override across the merge
+                    self.set_override(row["path"], language=row["override_language"],
+                                      category=row["override_category"],
+                                      frameworks=_loads(row["override_frameworks"]), note=row["override_note"])
+                merged += 1
+            self.recompute_relationships()
+            return merged
+        finally:
+            src.close()
+
+    def _nearest_ancestor_path(self, path, pathset):
+        """The closest ancestor directory of 'path' that is itself a project path in 'pathset', or None."""
+        parent = os.path.dirname(path)
+        while parent and parent != os.path.dirname(parent):
+            if parent in pathset:
+                return parent
+            parent = os.path.dirname(parent)
+        return None
+
+    def recompute_relationships(self):
+        """
+        Rebuild every project's parent_path / role from the paths currently in the database.
+
+        A project physically nested inside another saved project becomes its child; everything else is a root. This keeps nesting consistent even when the two were saved from separate scans, so nothing breaks when one saved project sits inside another.
+        """
+        rows = self.con.execute("SELECT id, path FROM projects").fetchall()
+        pathset = {r["path"] for r in rows}
+        for r in rows:
+            parent = self._nearest_ancestor_path(r["path"], pathset)
+            self.con.execute("UPDATE projects SET parent_path = ?, role = ? WHERE id = ?",
+                             (parent, "child" if parent else "root", r["id"]))
+        self.con.commit()
     # ------------------------------------------------------------------------ #
 
     # -- Reads --------------------------------------------------------------- #

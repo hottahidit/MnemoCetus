@@ -22,8 +22,8 @@
       <tr><th>severity</th><th>kind</th><th>rule</th><th>location</th><th>detail</th></tr>
       {% for f in summary.findings %}
         <tr>
-          <td>{{ f.severity }}</td>
-          <td>{{ f.kind }}</td>
+          <td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td>
+          <td><span class="tag">{{ f.kind }}</span></td>
           <td>{{ f.rule }}</td>
           <td class="muted"><code>{{ f.path }}{% if f.line %}:{{ f.line }}{% endif %}</code></td>
           <td class="muted">{{ f.detail }}</td>

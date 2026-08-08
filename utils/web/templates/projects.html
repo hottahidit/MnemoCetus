@@ -27,7 +27,7 @@
     <label><input type="checkbox" name="uncertain" value="1"
                   {{ 'checked' if filters.uncertain else '' }}> uncertain only</label>
     <button type="submit">Filter</button>
-    <a href="{{ url_for('projects_view') }}">reset</a>
+    <a href="{{ url_for('projects_view') }}" class="btn-ghost">Reset</a>
   </form>
 
   {% if not projects %}
@@ -40,7 +40,7 @@
     </tr>
     {% for p in projects %}
       <tr>
-        <td><code>{{ p.path }}</code></td>
+        <td><a href="{{ url_for('project_view', path=p.path) }}"><code>{{ p.path }}</code></a></td>
         <td>{{ p.language }}</td>
         <td>
           {{ p.category }}

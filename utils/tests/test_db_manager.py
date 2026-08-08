@@ -813,5 +813,57 @@ class TestSecurityFindings(DBTestCase):
         self.assertEqual(self.db.get_security_findings(pid), [])
 
 
+# --------------------------------------------------------------------------- #
+# Merge + nesting - accumulate multiple scans, keep nested projects consistent (v0.6)
+# --------------------------------------------------------------------------- #
+class TestMergeAndNesting(DBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix="mnemo_merge_")
+
+    def tearDown(self):
+        super().tearDown()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _src(self, paths):
+        p = os.path.join(self.tmp, f"src{len(os.listdir(self.tmp))}.db")
+        db = db_manager.Database(p)
+        for path in paths:
+            db.upsert_project(sample_project(path=path))
+        db.close()
+        return p
+
+    def test_merge_accumulates_across_scans(self):
+        self.assertEqual(self.db.merge_from(self._src(["/X/a", "/X/b"])), 2)
+        self.assertEqual(self.db.merge_from(self._src(["/Y/c"])), 1)
+        self.assertEqual(len(self.db.all_projects()), 3)
+
+    def test_merge_is_idempotent(self):
+        s1 = self._src(["/X/a", "/X/b"])
+        self.db.merge_from(s1)
+        self.db.merge_from(s1)
+        self.assertEqual(len(self.db.all_projects()), 2)  # no duplicates on re-save
+
+    def test_only_paths_saves_a_subset(self):
+        self.assertEqual(self.db.merge_from(self._src(["/X/a", "/X/b", "/X/c"]), only_paths={"/X/a"}), 1)
+        self.assertEqual([p["path"] for p in self.db.all_projects()], ["/X/a"])
+
+    def test_nested_projects_saved_separately_link_up(self):
+        self.db.merge_from(self._src(["/root/app"]))
+        self.db.merge_from(self._src(["/root/app/sub"]))  # sub sits inside app
+        rows = {p["path"]: p for p in self.db.all_projects()}
+        self.assertIsNone(rows["/root/app"]["parent_path"])
+        self.assertEqual(rows["/root/app"]["role"], "root")
+        self.assertEqual(rows["/root/app/sub"]["parent_path"], "/root/app")
+        self.assertEqual(rows["/root/app/sub"]["role"], "child")
+
+    def test_queries_survive_deep_nesting(self):
+        self.db.merge_from(self._src(["/r/a", "/r/a/b", "/r/a/b/c"]))
+        self.assertEqual(len(self.db.all_projects()), 3)
+        self.db.storage_report()
+        self.db.dependency_overlap()
+        self.db.reclaimable_summary()
+
+
 if __name__ == "__main__":
     unittest.main()
