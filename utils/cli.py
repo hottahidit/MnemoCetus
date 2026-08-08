@@ -220,6 +220,7 @@ def _cli():
                         "Dependency conflicts (shareable-venv check)",
                         "Storage analysis (largest projects / files / dirs)",
                         "Security findings (secrets)",
+                        "Export report (Markdown / JSON)",
                         "Delete a project",
                         "Back",
                     ],
@@ -423,6 +424,26 @@ def _cli():
                             loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
                             t.add_row(str(f["severity"]), str(f["kind"]), str(f["rule"]), loc, str(f["detail"]))
                         print(t)
+
+                elif action == "Export report (Markdown / JSON)":
+                    import report
+                    fmt_choice = _menu("Format:", choices=["Markdown", "JSON", "Back"])
+                    if fmt_choice in (None, "Back"):
+                        continue
+                    fmt = "json" if fmt_choice == "JSON" else "md"
+                    default_name = report.suggested_filename(fmt)
+                    out_path = questionary.path("Save to:", default=default_name, style=_qstyle).ask()
+                    if not out_path:
+                        continue
+                    body = report.render(report.build_report(db_path), fmt)
+                    try:
+                        with open(out_path, "w", encoding="utf-8") as fh:
+                            fh.write(body)
+                    except OSError as exc:
+                        print(f"Could not write the report -> {exc}")
+                    else:
+                        print(Panel(f"Report written to [bold]{out_path}[/] ({len(body):,} bytes).",
+                                    title="Export report", style="green"))
 
                 elif action == "Delete a project":
                     directory = ask_dir("Project path to delete:")

@@ -13,7 +13,7 @@
 import os
 import sys
 
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, Response
 
 # Make the sibling modules (db_manager) importable whether it's run as a script or imported.
 UTILS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +21,7 @@ if UTILS_DIR not in sys.path:
     sys.path.insert(0, UTILS_DIR)
 
 import db_manager  # noqa: E402
+import report  # noqa: E402
 
 # The categories offered in the recategorise dropdown (mirrors the CLI review choices).
 CATEGORIES = ["backend", "frontend", "full stack", "automation", "library", "cli", "desktop", "application", "data/ml", "other"]
@@ -266,6 +267,22 @@ def create_app(db_path=None):
             "security.html",
             db_path=os.path.normpath(current_db()),
             summary=_security(current_db()),
+        )
+
+    @app.route("/export")
+    def export_view():
+        # ?format=md (default) or json -> download the whole workspace report as one file.
+        fmt = "json" if request.args.get("format", "md").lower() == "json" else "md"
+        path = current_db()
+        if not os.path.exists(path):
+            # Nothing scanned yet -> send them back to the dashboard rather than an empty file.
+            return redirect(url_for("index"))
+        body = report.render(report.build_report(path), fmt)
+        mimetype = "application/json" if fmt == "json" else "text/markdown"
+        return Response(
+            body,
+            mimetype=mimetype,
+            headers={"Content-Disposition": f"attachment; filename={report.suggested_filename(fmt)}"},
         )
 
     @app.route("/project")

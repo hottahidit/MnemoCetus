@@ -186,6 +186,8 @@
       <a href="{{ url_for('overlap_view') }}"{% if request.endpoint == 'overlap_view' %} class="active"{% endif %}>Overlap</a>
       <a href="{{ url_for('storage_view') }}"{% if request.endpoint == 'storage_view' %} class="active"{% endif %}>Storage</a>
       <a href="{{ url_for('security_view') }}"{% if request.endpoint == 'security_view' %} class="active"{% endif %}>Security</a>
+      <a href="{{ url_for('export_view', format='md') }}" title="Download the whole workspace report as Markdown">Export MD</a>
+      <a href="{{ url_for('export_view', format='json') }}" title="Download the whole workspace report as JSON">Export JSON</a>
     </nav>
     <span class="db">database: <code>{{ db_path }}</code></span>
     <button id="theme-toggle" title="Toggle light / dark" aria-label="Toggle theme">&#9790;</button>
