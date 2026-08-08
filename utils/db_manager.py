@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 
-SCHEMA_VERSION = 5  # NOTE: Remember to bump this value with every new update
+SCHEMA_VERSION = 6  # NOTE: Remember to bump this value with every new update
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mnemocetus.db")
 
@@ -112,6 +112,8 @@ class Database:
             self._migrate_to_v4()  # v0.5 dependency version specs
         if from_version < 5:
             self._migrate_to_v5()  # v0.5 MnemoScan security findings
+        if from_version < 6:
+            self._migrate_to_v6()  # v0.7 covering index on files(path, size_bytes) for the storage rollup
         self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.con.commit()
 
@@ -180,6 +182,14 @@ class Database:
             """
         )
         self.con.execute("CREATE INDEX IF NOT EXISTS idx_security_project ON security_findings(project_id)")
+
+    def _migrate_to_v6(self):
+        """Covering-index files(path, size_bytes) so the storage rollup's 'GROUP BY path' is served from the index (idempotent; skips a partial DB with no files table)."""
+        tables = {r["name"] for r in self.con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "files" not in tables:
+            return  # a partial old DB with no files table -> nothing to index
+        self.con.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path, size_bytes)")
     # ------------------------------------------------------------------------ #
 
     # -- Scans --------------------------------------------------------------- #

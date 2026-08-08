@@ -116,5 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_projects_category   ON projects(category);
 CREATE INDEX IF NOT EXISTS idx_dependencies_name   ON dependencies(name);
 CREATE INDEX IF NOT EXISTS idx_dependencies_project ON dependencies(project_id);
 CREATE INDEX IF NOT EXISTS idx_files_project       ON files(project_id);
+-- The storage rollup groups the whole inventory by path (SELECT path, MAX(size_bytes) ... GROUP BY path).
+-- A COVERING (path, size_bytes) index serves that from the index alone -> no table lookups, no sort.
+CREATE INDEX IF NOT EXISTS idx_files_path           ON files(path, size_bytes);
 CREATE INDEX IF NOT EXISTS idx_marks_project       ON marks(project_id);
 CREATE INDEX IF NOT EXISTS idx_security_project    ON security_findings(project_id);
