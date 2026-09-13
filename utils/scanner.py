@@ -134,13 +134,9 @@ def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, fi
     return _metrics(_collect_files(directory, name_rules, path_rules, file_paths), dependency_count)
 ## ---------------------------------------------------------------------------------------- ##
 
-def _human_size(num_bytes):
-    """Turn a byte count into something readable (e.g. 1536 -> '1.5 KB')."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
+# The byte-size formatter now lives in utils (one shared copy); re-exported here under its long-standing
+# name so `from scanner import _human_size` (cli.py) keeps working.
+from utils import human_size as _human_size
 
 def describe(info):
     """Human-readable one-liner for a classification dict (back-compat string form)."""

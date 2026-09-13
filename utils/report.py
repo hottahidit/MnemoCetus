@@ -7,35 +7,21 @@
 from datetime import datetime
 import json
 
-import db_manager
-
-
-def _human_size(num_bytes):
-    """Bytes -> readable string (kept local so the report layer never imports the scanner, matching the web layer)."""
-    size = float(num_bytes or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
+import utils
+from utils import human_size as _human_size
 
 
 def _overview(projects):
     """Roll the project list up into the headline counts (kept in step with the web dashboard's _dashboard_stats)."""
     by_language, by_category = {}, {}
-    confidence = {"low (<0.6)": 0, "medium (0.6-0.85)": 0, "high (>0.85)": 0}
+    confidence = utils.empty_confidence_counts()
     confirmed = 0
     for p in projects:
         by_language[p["language"] or "unknown"] = by_language.get(p["language"] or "unknown", 0) + 1
         by_category[p["category"] or "uncategorised"] = by_category.get(p["category"] or "uncategorised", 0) + 1
         if p["user_confirmed"]:
             confirmed += 1
-        c = p["confidence"] or 0
-        if c < 0.6:
-            confidence["low (<0.6)"] += 1
-        elif c <= 0.85:
-            confidence["medium (0.6-0.85)"] += 1
-        else:
-            confidence["high (>0.85)"] += 1
+        confidence[utils.confidence_band(p["confidence"])] += 1
     return {
         "project_count": len(projects),
         "total_bytes": sum(p["size_bytes"] or 0 for p in projects),
@@ -54,8 +40,7 @@ def build_report(db_path):
     Opens its own read-only connection so either front-end can call it with just a path.
     Every section mirrors a view the tool already shows on screen, so the export never drifts from the live UI.
     """
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         projects = db.all_projects()
         return {
             "meta": {
@@ -93,8 +78,6 @@ def build_report(db_path):
             "security": db.security_summary(),
             "storage": db.storage_report(),
         }
-    finally:
-        db.close()
 
 
 def render_json(report):
