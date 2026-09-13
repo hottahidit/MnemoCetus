@@ -7,6 +7,7 @@
 from rich import print, box
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.table import Table
 import os
 
 from scanner import persist_scan, _human_size
@@ -184,8 +185,6 @@ def _cli():
                     title="Saved long-term", style="green"))
 
     def do_browse(db_path):
-        from rich.table import Table
-
         if not os.path.exists(db_path):
             print("Nothing to browse there yet -> scan a directory first (or pick a saved database).")
             return
@@ -301,7 +300,6 @@ def _cli():
                     if not recs["item_count"]:
                         print("Nothing to recommend -> no reclaimable bloat recorded yet.")
                     else:
-                        from rich.table import Table
                         print(Panel(
                             f"You could reclaim [bold]{_human_size(recs['total_savings'])}[/] "
                             f"across {recs['item_count']} director(y/ies).\n"
@@ -320,7 +318,6 @@ def _cli():
                     if not overlap["total_instances"]:
                         print("No dependencies recorded yet -> scan some projects with a manifest first.")
                     else:
-                        from rich.table import Table
                         pct = overlap["duplication_ratio"] * 100
                         eco = "\n".join(
                             f"  {name:12} {v['distinct']} distinct across {v['projects']} project(s)"
@@ -351,7 +348,6 @@ def _cli():
                     if not ecos:
                         print("No ecosystem spans 2+ projects yet -> scan more projects with manifests first.")
                     else:
-                        from rich.table import Table
                         for eco, d in ecos.items():
                             if d["shareable"]:
                                 print(Panel(
@@ -380,7 +376,6 @@ def _cli():
                     if not report["total_files"]:
                         print("No file inventory recorded yet -> scan a directory first.")
                     else:
-                        from rich.table import Table
                         print(Panel(
                             f"Workspace: [bold]{_human_size(report['total_bytes'])}[/] across "
                             f"{report['total_files']} files in {report['project_count']} project(s).\n"
@@ -411,7 +406,6 @@ def _cli():
                     if not summary["total"]:
                         print("No security findings recorded -> secrets are scanned when you scan a directory.")
                     else:
-                        from rich.table import Table
                         sev = ", ".join(f"{k}: {v}" for k, v in summary["by_severity"].items())
                         print(Panel(
                             f"[bold]{summary['total']}[/] finding(s) -> {sev}\n"
@@ -528,7 +522,6 @@ def _cli():
         if not findings:
             print("No vulnerabilities reported (or pip-audit / npm audit isn't installed -> the audit is optional).")
             return
-        from rich.table import Table
         table = Table(title=f"Dependency audit -> {directory}", box=box.ROUNDED, header_style="bold cyan")
         for col in ("severity", "package / advisory", "detail"):
             table.add_column(col, overflow="fold")

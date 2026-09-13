@@ -22,103 +22,71 @@ if UTILS_DIR not in sys.path:
 
 import db_manager  # noqa: E402
 import report  # noqa: E402
+import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
 
 # The categories offered in the recategorise dropdown (mirrors the CLI review choices).
 CATEGORIES = ["backend", "frontend", "full stack", "automation", "library", "cli", "desktop", "application", "data/ml", "other"]
-
-def _human_size(num_bytes):
-    """Bytes -> readable string (kept local so the web layer never imports the scanner)."""
-    size = float(num_bytes or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
 
 def _load_projects(db_path):
     """All inflated projects (override-aware), or [] when there's no database yet."""
     if not os.path.exists(db_path):
         return []
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.all_projects()
-    finally:
-        db.close()
 
 def _latest_scan(db_path):
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.latest_scan()
-    finally:
-        db.close()
 
 def _reclaimable(db_path):
     """Workspace-wide reclaimable-space rollup (marks), or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.reclaimable_summary()
-    finally:
-        db.close()
 
 def _cleanup(db_path, min_bytes=0):
     """Advisory cleanup recommendations (never deletes), or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.cleanup_recommendations(min_bytes=min_bytes)
-    finally:
-        db.close()
 
 def _overlap(db_path, min_projects=2):
     """Cross-project dependency overlap + rough env savings, or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.dependency_overlap(min_projects=min_projects)
-    finally:
-        db.close()
 
 def _intel(db_path, min_projects=2):
     """Version-aware dependency conflict / shareable-venv analysis, or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.dependency_intel(min_projects=min_projects)
-    finally:
-        db.close()
 
 def _storage(db_path, limit=10):
     """Workspace storage analysis (largest projects / files / dirs), or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.storage_report(limit=limit)
-    finally:
-        db.close()
 
 def _security(db_path):
     """Workspace MnemoScan rollup (secrets / vulns), or None when there's no database yet."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         return db.security_summary()
-    finally:
-        db.close()
 
 def _project_detail(db_path, path):
     """Everything about one project (deps + marks + security findings), or None if it isn't in the db."""
     if not os.path.exists(db_path):
         return None
-    db = db_manager.Database(db_path)
-    try:
+    with utils.open_db(db_path) as db:
         project = db.get_project(path)
         if project is None:
             return None
@@ -128,13 +96,11 @@ def _project_detail(db_path, path):
             "marks": db.get_marks(project["id"]),
             "findings": db.get_security_findings(project["id"]),
         }
-    finally:
-        db.close()
 
 def _dashboard_stats(projects):
     """Roll the project list up into the numbers the dashboard shows."""
     by_language, by_category = {}, {}
-    confidence = {"low (<0.6)": 0, "medium (0.6-0.85)": 0, "high (>0.85)": 0}
+    confidence = utils.empty_confidence_counts()
     confirmed = 0
     for p in projects:
         lang, cat = (p["language"] or "unknown"), (p["category"] or "uncategorised")
@@ -146,13 +112,7 @@ def _dashboard_stats(projects):
         bc["bytes"] += p["size_bytes"] or 0
         if p["user_confirmed"]:
             confirmed += 1
-        c = p["confidence"] or 0
-        if c < 0.6:
-            confidence["low (<0.6)"] += 1
-        elif c <= 0.85:
-            confidence["medium (0.6-0.85)"] += 1
-        else:
-            confidence["high (>0.85)"] += 1
+        confidence[utils.confidence_band(p["confidence"])] += 1
     return {
         "project_count": len(projects),
         "total_bytes": sum(p["size_bytes"] or 0 for p in projects),
@@ -184,7 +144,7 @@ def create_app(db_path=None):
     """Flask app factory -> keeps things testable and lets us point at any .db file."""
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path or db_manager.DEFAULT_DB_PATH
-    app.jinja_env.filters["humansize"] = _human_size
+    app.jinja_env.filters["humansize"] = utils.human_size
 
     def current_db():
         return app.config["DB_PATH"]
@@ -300,11 +260,8 @@ def create_app(db_path=None):
 
     def with_db(action):
         if os.path.exists(current_db()):
-            db = db_manager.Database(current_db())
-            try:
+            with utils.open_db(current_db()) as db:
                 action(db)
-            finally:
-                db.close()
         return back()
 
     @app.route("/projects/override", methods=["POST"])
