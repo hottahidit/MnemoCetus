@@ -15,7 +15,7 @@ from contextlib import contextmanager
 @contextmanager
 def open_db(db_path):
     """Open a Database and guarantee it is closed afterwards -> `with open_db(path) as db: ...`."""
-    import db_manager  # lazy: keeps `import utils` free of the DB layer for callers that only want human_size
+    from db_tools import manager as db_manager  # lazy: keeps `import utils` free of the DB layer for callers that only want human_size
     db = db_manager.Database(db_path)
     try:
         yield db

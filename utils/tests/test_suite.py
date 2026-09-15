@@ -593,7 +593,7 @@ class TestMarks(ScannerTestCase):
 
 class TestPersistScan(ScannerTestCase):
     def test_persist_scan_stores_projects_and_deps(self):
-        import db_manager
+        from db_tools import manager as db_manager
         write(self.path("backend", "requirements.txt"), "flask\nrequests\n")
         write(self.path("backend", "app.py"), "x = 1\n")
         db_path = self.path("out.db")
@@ -613,7 +613,7 @@ class TestPersistScan(ScannerTestCase):
             db.close()
 
     def test_persist_scan_records_reclaimable_marks(self):
-        import db_manager
+        from db_tools import manager as db_manager
         write(self.path("backend", "requirements.txt"), "flask\n")
         write(self.path("backend", "app.py"), "x = 1\n")
         # regenerable bloat the scan filters out, but persist should size + record:

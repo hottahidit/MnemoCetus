@@ -13,7 +13,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utils"))
 
 try:
-    import db_manager
+    from db_tools import manager as db_manager
     from web.app import create_app
     HAS_FLASK = True
 except ImportError:

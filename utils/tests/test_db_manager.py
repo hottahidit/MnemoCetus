@@ -15,7 +15,7 @@ import os, sys, shutil, sqlite3, tempfile, unittest
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utils"))
 
-import db_manager  # noqa: E402
+from db_tools import manager as db_manager  # noqa: E402
 
 
 def sample_project(path="/tmp/example", **overrides):

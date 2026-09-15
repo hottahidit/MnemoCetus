@@ -554,7 +554,7 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     Returns:
         (scan_id, project_count): the stored scan's id and how many projects landed.
     """
-    import db_manager  # local import -> the DB layer is optional for plain scanning
+    from db_tools import manager as db_manager  # local import -> the DB layer is optional for plain scanning
     from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
     from security import scan_secrets  # local import -> keep the security layer out of plain scanning
 

@@ -20,7 +20,7 @@ UTILS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if UTILS_DIR not in sys.path:
     sys.path.insert(0, UTILS_DIR)
 
-import db_manager  # noqa: E402
+from db_tools import manager as db_manager  # noqa: E402
 import report  # noqa: E402
 import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
 
