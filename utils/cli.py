@@ -77,6 +77,7 @@ def _cli():
     import questionary
     from db_tools import manager as db_manager
     import settings
+    import arbiter
 
     if not sys.stdin.isatty():
         print("The interactive CLI needs a real terminal. Run: python utils/scanner.py")
@@ -122,6 +123,105 @@ def _cli():
             title="Web + CLI", style="cyan"))
         return url
 
+    # --- AI arbiter (opt-in; nothing here runs unless the user enabled it) ---- #
+    def _configure_arbiter(cfg):
+        """Interactive setup for the AI arbiter block -> shared by the first-run wizard and Settings."""
+        ac = cfg["arbiter"]
+        enabled = questionary.confirm(
+            "Enable the AI arbiter? An optional second opinion on low-confidence projects (off by default).",
+            default=ac["enabled"], style=_qstyle).ask()
+        if enabled is None:
+            return
+        ac["enabled"] = enabled
+        if not enabled:
+            settings.save(cfg)
+            print("AI arbiter is off.")
+            return
+        provider = _menu("AI provider:", choices=list(arbiter.PRESETS.keys()) + ["custom"])
+        if provider is None:
+            return
+        ac["provider"] = provider
+        preset = arbiter.PRESETS.get(provider, {})
+        default_base = ac["base_url"] if provider == "custom" else preset.get("base_url", ac["base_url"])
+        ac["base_url"] = questionary.text("Base URL:", default=default_base, style=_qstyle).ask() or default_base
+        local = arbiter.is_local(ac["base_url"])
+        # Model: for OpenAI-compatible endpoints try to list what's available; otherwise ask by name.
+        models = None
+        if provider not in ("anthropic", "gemini"):
+            key = os.environ.get(preset.get("api_key_env", "")) if preset.get("api_key_env") else None
+            models = arbiter.list_models(ac["base_url"], key)
+        if models:
+            pick = _menu("Model:", choices=models + ["(enter manually)"])
+            if pick in (None, "(enter manually)"):
+                ac["model"] = questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                               style=_qstyle).ask() or ac["model"]
+            else:
+                ac["model"] = pick
+        else:
+            ac["model"] = questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                           style=_qstyle).ask() or ac["model"]
+        if local:
+            ac["api_key_env"] = ""
+        else:
+            print(Panel(
+                "This is a CLOUD endpoint -> project paths are REDACTED to folder names only (e.g. 'SokaOS'), "
+                "never absolute paths. Dependency, marker and language signals are still sent.",
+                title="Privacy", style="yellow"))
+            default_env = ac["api_key_env"] or preset.get("api_key_env", "")
+            ac["api_key_env"] = questionary.text(
+                "Name of the env var holding the API key:", default=default_env, style=_qstyle).ask() or default_env
+        ac["run_after_scan"] = bool(questionary.confirm(
+            "Run the arbiter automatically after a scan (on low-confidence projects, before you review them)?",
+            default=ac["run_after_scan"], style=_qstyle).ask())
+        settings.save(cfg)
+        if questionary.confirm("Test the connection now?", default=True, style=_qstyle).ask():
+            ok, msg = arbiter.get_provider(ac).ping()
+            print(Panel(f"{'✅' if ok else '❌'} {msg}", title="Arbiter connection",
+                        style="green" if ok else "red"))
+
+    def _setup_wizard(cfg):
+        """One-time first-run setup (web dashboard + AI arbiter). Records 'configured' so it never repeats."""
+        print(Panel(
+            "Welcome to MnemoCetus 🐳\nA quick one-time setup -> you can change any of this later in Settings.",
+            title="First-run setup", style="cyan"))
+        cfg["web_enabled"] = bool(questionary.confirm(
+            "Auto-start the web dashboard alongside the CLI?", default=cfg["web_enabled"], style=_qstyle).ask())
+        _configure_arbiter(cfg)
+        cfg["configured"] = True
+        settings.save(cfg)
+        print("[green]Setup complete.[/]\n")
+
+    def _arbitrate(db_path, ask=True):
+        """Run the arbiter over the current scan's low-confidence projects -> {path: suggestion}."""
+        ac = rt["cfg"]["arbiter"]
+        if not ac["enabled"]:
+            print("AI arbiter is off -> turn it on in Settings first.")
+            return {}
+        if not os.path.exists(db_path):
+            print("Nothing to arbitrate -> scan a directory first.")
+            return {}
+        db = db_manager.Database(db_path)
+        try:
+            pending = db.low_confidence_projects()
+        finally:
+            db.close()
+        if not pending:
+            print("No low-confidence projects -> nothing for the arbiter to weigh in on.")
+            return {}
+        if ask and not questionary.confirm(
+                f"Ask the arbiter about {len(pending)} low-confidence project(s)?",
+                default=True, style=_qstyle).ask():
+            return {}
+        from rich.console import Console
+        suggestions = {}
+        with Console().status("[cyan]Consulting the arbiter...[/]", spinner="dots"):
+            for p in pending:
+                s = arbiter.classify_project(p, ac, workspace_root=session["root"])
+                if s:
+                    suggestions[p["path"]] = s
+        print(f"Arbiter offered {len(suggestions)} suggestion(s) across {len(pending)} project(s).")
+        return suggestions
+
     # --- main actions ---------------------------------------------------- #
     def do_scan():
         directory = ask_dir("Directory to scan (blank to go back):")
@@ -148,6 +248,11 @@ def _cli():
             f"[dim]This lasts until your next scan. Choose 'Save this scan long-term' to keep it; "
             f"all the other features now work on this scan.[/]",
             title="Scan complete", style="green"))
+        # Opt-in: weigh in on the uncertain ones with the arbiter, then drop into review, before the user moves on.
+        if rt["cfg"]["arbiter"]["enabled"] and rt["cfg"]["arbiter"]["run_after_scan"]:
+            sug = _arbitrate(session["db"], ask=False)
+            if sug:
+                do_review(session["db"], sug)
         _pause()
 
     def do_classify():
@@ -401,6 +506,11 @@ def _cli():
             db.close()
 
     permanent_db = os.path.normpath(db_manager.DEFAULT_DB_PATH)
+
+    # First-run setup wizard -> runs once, then records 'configured' so it never nags again.
+    if not rt["cfg"].get("configured"):
+        _setup_wizard(rt["cfg"])
+
     # The web dashboard is opt-in (Settings) -> only auto-start it when the user has turned it on.
     if rt["cfg"]["web_enabled"]:
         rt["web_url"] = _start_web(session["db"], rt["cfg"]["web_port"])
@@ -421,10 +531,12 @@ def _cli():
         cfg = rt["cfg"]
         while True:
             action = _menu(
-                f"Settings  (web dashboard: {'ON' if cfg['web_enabled'] else 'off'}, port {cfg['web_port']}):",
+                f"Settings  (web: {'ON' if cfg['web_enabled'] else 'off'} · "
+                f"AI arbiter: {'ON' if cfg['arbiter']['enabled'] else 'off'}):",
                 choices=[
                     "Turn web dashboard OFF" if cfg["web_enabled"] else "Turn web dashboard ON",
                     "Set web port",
+                    "Configure AI arbiter",
                     "↩ Back",
                 ],
             )
@@ -448,6 +560,8 @@ def _cli():
                     print(f"Port set to {cfg['web_port']} (applies the next time the web starts).")
                 except (TypeError, ValueError):
                     print("Not a number -> port unchanged.")
+            elif action == "Configure AI arbiter":
+                _configure_arbiter(cfg)
 
     # Step 1 gates everything: you scan first, which auto-holds the result in temporary memory; only then do the analysis features open up (running against that scan until you save it long-term).
     while True:
@@ -475,6 +589,7 @@ def _cli():
                 "Explore this scan (browse / search / analyse)",
                 save_label,
                 "Review low-confidence projects",
+                "AI: re-classify uncertain projects",
                 "Dependency vulnerability audit (optional)",
                 "Reclaimer (delete bloat / build a uni-venv)",
                 "Scan a different directory",
@@ -494,6 +609,11 @@ def _cli():
             _pause()
         elif action == "Review low-confidence projects":
             do_review(session["db"])
+            _pause()
+        elif action.startswith("AI:"):
+            sug = _arbitrate(session["db"])
+            if sug:
+                do_review(session["db"], sug)
             _pause()
         elif action == "Dependency vulnerability audit (optional)":
             do_audit()

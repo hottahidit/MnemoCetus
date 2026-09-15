@@ -283,7 +283,9 @@ def do_browse(db_path):
         db.close()
 
 
-def do_review(db_path):
+def do_review(db_path, suggestions=None):
+    # suggestions: optional {path: {language, category, frameworks, confidence, rationale}} from the AI arbiter.
+    suggestions = suggestions or {}
     if not os.path.exists(db_path):
         print("Nothing to review yet -> scan a directory first.")
         return
@@ -306,27 +308,37 @@ def do_review(db_path):
                 db.approve(p["path"])
                 continue
             auto = p["auto"]
-            print(Panel(
+            sug = suggestions.get(p["path"])
+            body = (
                 f"auto guess: {auto['language']} / {auto['category']}  (confidence {auto['confidence']:.2f})\n"
                 f"frameworks: {', '.join(auto['frameworks']) or '(none)'}\n"
-                f"breakdown:  {p['breakdown']['categories']}",
-                title=p["path"], style="yellow"))
-            choice = _menu(
-                "What is this project?",
-                choices=[
-                    "Accept this guess",
-                    "Set the real type",
-                    "Delete the project",
-                    "Yes to all (accept the rest)",
-                    "Skip",
-                    "Stop",
-                ],
+                f"breakdown:  {p['breakdown']['categories']}"
             )
+            if sug:
+                conf = f"{sug['confidence']:.2f}" if sug.get("confidence") is not None else "?"
+                body += (f"\n[bold cyan]AI arbiter:[/] {sug.get('language') or '?'} / "
+                         f"{sug.get('category') or '?'}  (confidence {conf})")
+                if sug.get("rationale"):
+                    body += f"\n[dim]{sug['rationale']}[/]"
+            print(Panel(body, title=p["path"], style="yellow"))
+            choices = (["Accept AI suggestion"] if sug else []) + [
+                "Accept this guess",
+                "Set the real type",
+                "Delete the project",
+                "Yes to all (accept the rest)",
+                "Skip",
+                "Stop",
+            ]
+            choice = _menu("What is this project?", choices=choices)
             if choice in (None, "Stop"):
                 break
             if choice == "Skip":
                 continue
-            if choice == "Accept this guess":
+            if choice == "Accept AI suggestion":
+                db.set_override(p["path"], language=sug.get("language"), category=sug.get("category"),
+                                frameworks=sug.get("frameworks") or None,
+                                note=(f"AI arbiter: {sug.get('rationale', '')}").strip())
+            elif choice == "Accept this guess":
                 db.approve(p["path"])
             elif choice == "Yes to all (accept the rest)":
                 db.approve(p["path"])
