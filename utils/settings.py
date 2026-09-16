@@ -14,6 +14,7 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".mnemocetus.json")
 DEFAULTS = {
     "web_enabled": False,
     "web_port": 5000,
+    "scan_workers": 0,                 # per-project scan threads; 0 = auto (persist_scan's built-in default). Set by "Auto-tune".
     "configured": False,               # flipped True once the first-run setup wizard has run
     "arbiter": {
         "enabled": False,              # opt-in second opinion on low-confidence projects
