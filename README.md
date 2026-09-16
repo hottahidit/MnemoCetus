@@ -101,7 +101,7 @@ dashboard need the packages above.
 Run the interactive tool:
 
 ```bash
-python utils/scanner.py
+python cli.py
 ```
 
 You **scan a directory first** - choosing how nested projects are handled (CLASSIFY / SKIP / MERGE /
