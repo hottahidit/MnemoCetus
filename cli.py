@@ -1,13 +1,19 @@
 # Interactive CLI for MnemoCetus (the interactive questionary menu).
 #
-# This is the human-facing front-end; the engines live in scanner / classifier / cleaner / db_manager.
-# Launch it with 'python utils/scanner.py' (which delegates here) or 'python utils/cli.py' directly.
+# This is the human-facing front-end and the app's ENTRY POINT -> it lives at the repo root, while the
+# engine modules (scanner / classifier / cleaner / db_manager / ...) live in utils/.
+# Launch it with 'python cli.py' (or 'python utils/scanner.py', which delegates here).
 
 # IMPORTS
+import os
+import sys
+
+# The engine modules live in utils/; put that on the import path before importing them (mirrors web/app.py).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils"))
+
 from rich import print
 from rich.panel import Panel
 from rich.rule import Rule
-import os
 
 from scanner import persist_scan, _human_size
 
@@ -25,7 +31,7 @@ def _cli():
     import arbiter
 
     if not sys.stdin.isatty():
-        print("The interactive CLI needs a real terminal. Run: python utils/scanner.py")
+        print("The interactive CLI needs a real terminal. Run: python cli.py")
         return
 
     # The current scan is held in a TEMPORARY database (overwritten on each new scan) -> "save long-term" copies it to the permanent database.
