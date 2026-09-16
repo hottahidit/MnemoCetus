@@ -238,10 +238,19 @@ def _cli():
         # Fresh temporary store -> each scan replaces the last, so it's only held until the next scan.
         if os.path.exists(session["db"]):
             os.remove(session["db"])
-        from rich.console import Console
-        with Console().status("[cyan]Scanning + classifying...[/]", spinner="dots"):
+        from rich.progress import (Progress, SpinnerColumn, TextColumn, BarColumn,
+                                    MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn)
+        # Indeterminate spinner during the walk (total unknown), then a real bar as projects are stored.
+        with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/]"), BarColumn(),
+                      MofNCompleteColumn(), TimeElapsedColumn(), TimeRemainingColumn(),
+                      transient=True) as _prog:
+            _task = _prog.add_task("Scanning workspace...", total=None)
+            def _on_progress(done, total):
+                _prog.update(_task, total=total, completed=done, description="Classifying + storing")
             _scan_id, count = persist_scan(directory, db_path=session["db"], mode=mode,
-                                           confirm_filters=apply_filters, security=secrets)
+                                           confirm_filters=apply_filters, security=secrets,
+                                           workers=rt["cfg"].get("scan_workers") or None,
+                                           progress=_on_progress)
         session.update(root=directory, mode=mode, security=secrets, count=count, saved=False)
         print(Panel(
             f"Scanned + held in temporary memory: [bold]{count}[/] project(s) under {directory}.\n"
@@ -526,17 +535,47 @@ def _cli():
         print(Rule(f"[bold cyan]🐳 MnemoCetus[/]   [dim]│[/]   {state}   [dim]│[/]   {web}",
                    style="cyan", align="left"))
 
+    def _autotune():
+        """Benchmark a throwaway workspace across worker counts and save the fastest for this machine."""
+        import tuning
+        from rich.table import Table
+        from rich import box
+        from rich.progress import (Progress, SpinnerColumn, TextColumn, BarColumn,
+                                    MofNCompleteColumn, TimeElapsedColumn)
+        if not questionary.confirm(
+                "Build a small test workspace and time a few scans to find this machine's best worker "
+                "count? (~15-40s; nothing is kept)", default=True, style=_qstyle).ask():
+            return
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Auto-tuning scan workers[/]"), BarColumn(),
+                      MofNCompleteColumn(), TimeElapsedColumn(), transient=True) as prog:
+            task = prog.add_task("tuning", total=None)
+            best, results = tuning.autotune(
+                progress=lambda done, total: prog.update(task, total=total, completed=done))
+        table = Table(title="Auto-tune results", box=box.ROUNDED, header_style="bold cyan")
+        table.add_column("workers")
+        table.add_column("time (s)")
+        for w, sec in results:
+            table.add_row(f"{w}  ⭐" if w == best else str(w), f"{sec:.3f}")
+        print(table)
+        rt["cfg"]["scan_workers"] = best
+        settings.save(rt["cfg"])
+        print(Panel(f"Saved -> scans on this machine will use [bold]{best}[/] worker(s).\n"
+                    f"[dim]Reset to automatic by re-tuning or editing ~/.mnemocetus.json (scan_workers: 0).[/]",
+                    title="Auto-tune complete", style="green"))
+
     def do_settings():
-        """Toggle global preferences -> the opt-in web dashboard and its port. Persisted to ~/.mnemocetus.json."""
+        """Toggle global preferences -> web dashboard, AI arbiter, and scan auto-tuning. Persisted to ~/.mnemocetus.json."""
         cfg = rt["cfg"]
         while True:
             action = _menu(
                 f"Settings  (web: {'ON' if cfg['web_enabled'] else 'off'} · "
-                f"AI arbiter: {'ON' if cfg['arbiter']['enabled'] else 'off'}):",
+                f"AI arbiter: {'ON' if cfg['arbiter']['enabled'] else 'off'} · "
+                f"scan workers: {cfg['scan_workers'] or 'auto'}):",
                 choices=[
                     "Turn web dashboard OFF" if cfg["web_enabled"] else "Turn web dashboard ON",
                     "Set web port",
                     "Configure AI arbiter",
+                    "Auto-tune scan performance",
                     "↩ Back",
                 ],
             )
@@ -562,6 +601,8 @@ def _cli():
                     print("Not a number -> port unchanged.")
             elif action == "Configure AI arbiter":
                 _configure_arbiter(cfg)
+            elif action == "Auto-tune scan performance":
+                _autotune()
 
     # Step 1 gates everything: you scan first, which auto-holds the result in temporary memory; only then do the analysis features open up (running against that scan until you save it long-term).
     while True:

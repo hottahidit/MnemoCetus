@@ -79,7 +79,7 @@ def _is_excluded(path, name_rules, path_rules):
     return any(norm.startswith(p + os.sep) for p in path_rules)  # anything under an excluded path
 
 ## -- FILE COLLECTION --------------------------------------------------------------------- ##
-def _collect_files(directory, name_rules, path_rules, file_paths=None):
+def _collect_files(directory, name_rules, path_rules, file_paths=None, sizes=None):
     """
     One pass over a project's files -> a list of (path, size_bytes), honouring excludes + hidden.
 
@@ -96,14 +96,18 @@ def _collect_files(directory, name_rules, path_rules, file_paths=None):
 
     if file_paths is not None:
         # Reuse an existing scan -> keep only the paths that sit under this directory.
+        # Sizes gathered during that scan (via 'sizes') are reused, so we never re-stat the tree.
         base = os.path.normpath(directory)
         for p in file_paths:
             norm = os.path.normpath(p)
             if norm == base or norm.startswith(base + os.sep):
-                try:
-                    collected.append((norm, os.path.getsize(norm)))
-                except OSError:
-                    continue
+                size = sizes.get(norm) if sizes is not None else None
+                if size is None:
+                    try:
+                        size = os.path.getsize(norm)
+                    except OSError:
+                        continue
+                collected.append((norm, size))
     else:
         # No scan handy -> walk it ourselves, honouring the same excludes scan uses.
         for root, dirs, files in os.walk(directory):
@@ -176,6 +180,9 @@ class Scanner:
         self._name_rules, self._path_rules = compile_exclude_rules(exclude_list)
         # Memoisation store for classify() -> abs path -> (mtime, result).
         self._cache = {}
+        # File sizes captured during scan() (path -> size) so downstream metrics / inventory reuse them
+        # instead of re-stat-ing the whole tree.
+        self._sizes = {}
 
     def scan(self, directory, confirm_filters=True):
         """
@@ -192,6 +199,7 @@ class Scanner:
         files_scanned = 0
         bytes_scanned = 0
         file_paths = []
+        self._sizes = {}  # reset per scan; each file's size is captured once, below
 
         # Check if the directory exists and is accessible (error handling)
         if directory is None or not os.path.exists(directory):
@@ -221,21 +229,27 @@ class Scanner:
                         continue
 
                     try:
-                        file_paths.append(file_path)
-                        files_scanned += 1
-                        bytes_scanned += os.path.getsize(file_path)
+                        size = os.path.getsize(file_path)
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
+                        continue
+                    file_paths.append(file_path)
+                    self._sizes[file_path] = size    # captured once -> reused for metrics + inventory
+                    files_scanned += 1
+                    bytes_scanned += size
         else:
             for root, dirs, files in os.walk(directory):
                 for file in files:
                     file_path = os.path.normpath(os.path.join(root, file))
                     try:
-                        file_paths.append(file_path)
-                        files_scanned += 1
-                        bytes_scanned += os.path.getsize(file_path)
+                        size = os.path.getsize(file_path)
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
+                        continue
+                    file_paths.append(file_path)
+                    self._sizes[file_path] = size    # captured once -> reused for metrics + inventory
+                    files_scanned += 1
+                    bytes_scanned += size
 
         return file_paths
 
@@ -259,7 +273,7 @@ class Scanner:
             return os.path.exists(os.path.join(directory, *parts))
 
         def collect():
-            return _collect_files(directory, self._name_rules, self._path_rules, file_paths)
+            return _collect_files(directory, self._name_rules, self._path_rules, file_paths, self._sizes)
 
         # Python
         py_markers = [m for m in ("pyproject.toml", "requirements.txt", "setup.py", "Pipfile") if has(m)]
@@ -540,9 +554,16 @@ def _project_record(path, info):
         "symlink_target": info["symlink_target"],
     }
 
-def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True, security=True):
+def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True, security=True,
+                 progress=None, workers=None):
     """
     Scan 'directory', classify every project under it, and store the lot in SQLite.
+
+    The heavy per-project I/O (sizing regenerable bloat, building the file inventory, and the secret
+    scan) is read-only and independent, so it runs across a thread pool -> the GIL is released on every
+    stat/read, giving real overlap on this I/O-bound work. The SQLite writes stay on this one thread
+    (a single connection, no concurrent writers). Results are written in project order, so the stored
+    outcome is identical to the serial version.
 
     Args:
         directory (str): the workspace root to scan.
@@ -550,6 +571,9 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
         mode (str): relationship mode for resolve_relationships (CLASSIFY/SKIP/MERGE/SPLIT).
         confirm_filters (bool): apply the exclude filters while scanning (default True).
         security (bool): run the MnemoScan secret scan per project and store findings (default True).
+        progress (callable): optional progress(done, total) callback, called once with (0, total) then
+            after each project is stored -> lets the CLI draw a real progress bar.
+        workers (int): thread-pool size for the per-project read phase (default: scaled to CPU count).
 
     Returns:
         (scan_id, project_count): the stored scan's id and how many projects landed.
@@ -557,34 +581,56 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     from db_tools import manager as db_manager  # local import -> the DB layer is optional for plain scanning
     from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
     from security import scan_secrets  # local import -> keep the security layer out of plain scanning
+    from concurrent.futures import ThreadPoolExecutor
 
     sc = _default()
     files = sc.scan(directory, confirm_filters=confirm_filters)
     rels = sc.resolve_relationships(files, mode)
+    sizes = sc._sizes  # captured during the walk above -> reused, never re-stat-ed
+
+    def _prepare(item):
+        """Read-only, independent per-project work -> safe to run in parallel."""
+        project, info = item
+        marks = _collect_marks(project, sc._name_rules, sc._path_rules)  # size regenerable bloat
+        record = _project_record(project, info)
+        record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
+        inventory = _collect_files(project, sc._name_rules, sc._path_rules, files, sizes)  # file list
+        findings = scan_secrets(project, sc._name_rules, sc._path_rules) if security else []
+        return record, marks, inventory, findings
+
+    items = list(rels.items())
+    total = len(items)
+    if workers is None:
+        # The win comes from overlapping the secret scan's file reads; past ~8 threads the GIL-bound
+        # regex work and dispatch overhead eat the gains, so cap modestly (tunable via 'workers').
+        workers = min(8, (os.cpu_count() or 4) * 2)
+    workers = max(1, min(workers, total or 1))
 
     db = db_manager.Database(db_path) if db_path else db_manager.Database()
     try:
         scan_id = db.start_scan(os.path.abspath(directory))
         total_files = total_bytes = 0
-        for project, info in rels.items():
-            # Size up the regenerable bloat (node_modules, venv, ...) the scan filtered out.
-            marks = _collect_marks(project, sc._name_rules, sc._path_rules)
-            record = _project_record(project, info)
-            record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
-            pid = db.upsert_project(record, scan_id=scan_id)
-            # Populate the dependencies table, tagging each with its ecosystem (the project language) and declared version spec -> feeds the dependency-intelligence conflict check.
-            db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],
-                                 specs=record["dependency_specs"])
-            db.save_marks(pid, marks)                          # populate the reclaimable marks
-            # Persist the per-project file inventory too (reuses the scan's file list) -> feeds the storage analyser's "largest files / directories".
-            db.save_files(pid, _collect_files(project, sc._name_rules, sc._path_rules, files))
-            if security:
-                # MnemoScan: flag hard-coded secrets in the project's files (values are masked before storage).
-                db.save_security_findings(pid, scan_secrets(project, sc._name_rules, sc._path_rules))
-            total_files += record["metrics"]["file_count"]
-            total_bytes += record["metrics"]["size_bytes"]
-        db.finish_scan(scan_id, project_count=len(rels), file_count=total_files, total_bytes=total_bytes)
-        return scan_id, len(rels)
+        done = 0
+        if progress:
+            progress(0, total)
+        # Parallel read (threads) -> serial write (this thread). ex.map preserves input order.
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for record, marks, inventory, findings in ex.map(_prepare, items):
+                pid = db.upsert_project(record, scan_id=scan_id)
+                # Dependencies tagged with ecosystem + declared version spec -> feeds the conflict check.
+                db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],
+                                     specs=record["dependency_specs"])
+                db.save_marks(pid, marks)                       # reclaimable marks
+                db.save_files(pid, inventory)                   # per-project inventory (storage analyser)
+                if security:
+                    db.save_security_findings(pid, findings)    # MnemoScan (values already masked)
+                total_files += record["metrics"]["file_count"]
+                total_bytes += record["metrics"]["size_bytes"]
+                done += 1
+                if progress:
+                    progress(done, total)
+        db.finish_scan(scan_id, project_count=total, file_count=total_files, total_bytes=total_bytes)
+        return scan_id, total
     finally:
         db.close()
 ## ---------------------------------------------------------------------------------------- ##
