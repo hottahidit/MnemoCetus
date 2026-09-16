@@ -636,7 +636,10 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
 ## ---------------------------------------------------------------------------------------- ##
 
 # MAIN
-# (run directly -> hand off to the interactive CLI, which lives in cli.py now)
+# (run directly -> hand off to the interactive CLI, which lives in cli.py at the repo root now)
 if __name__ == "__main__":
+    import sys
+    # cli.py is one level up from utils/ -> put the repo root on the path so 'import cli' finds it.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from cli import main
     main()
