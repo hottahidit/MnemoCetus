@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS projects (
     user_confirmed      INTEGER DEFAULT 0,      -- 1 = user signed off / overrode (locked at full confidence)
     -- reclaimable "marks" rollup (v0.5 Stage B; added to existing DBs by the v3 migration)
     reclaimable_bytes   INTEGER DEFAULT 0,      -- total size of regenerable bloat (node_modules, venv, ...) under this project
+    -- git awareness (v0.9; added to existing DBs by the v7 migration)
+    git_branch       TEXT,                      -- current branch (NULL if not a git repo)
+    git_head         TEXT,                      -- HEAD commit sha (NULL if not a repo / no commits yet)
+    git_dirty        INTEGER DEFAULT 0,         -- 1 = uncommitted changes or untracked files present
+    git_ahead        INTEGER DEFAULT 0,         -- commits ahead of upstream (unpushed)
+    git_last_commit  INTEGER,                   -- unix timestamp of the last commit (NULL if unknown)
+    content_mtime    REAL,                      -- newest file mtime seen at scan time -> change detection for non-repos
     -- bookkeeping
     first_seen       TEXT,                      -- when we first indexed this project
     updated_at       TEXT,                      -- last time this row changed

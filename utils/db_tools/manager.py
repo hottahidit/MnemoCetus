@@ -9,7 +9,7 @@ import sqlite3
 
 from db_tools.analytics import AnalyticsMixin
 
-SCHEMA_VERSION = 6  # NOTE: Remember to bump this value with every new update
+SCHEMA_VERSION = 7  # NOTE: Remember to bump this value with every new update
 # schema.sql sits next to this file inside db_tools/; the DB lives at the project root (two levels up from db_tools/).
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "mnemocetus.db")
@@ -99,6 +99,8 @@ class Database(AnalyticsMixin):
             self._migrate_to_v5()  # v0.5 MnemoScan security findings
         if from_version < 6:
             self._migrate_to_v6()  # v0.7 covering index on files(path, size_bytes) for the storage rollup
+        if from_version < 7:
+            self._migrate_to_v7()  # v0.9 per-project git-awareness columns + content_mtime
         self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.con.commit()
 
@@ -175,6 +177,19 @@ class Database(AnalyticsMixin):
         if "files" not in tables:
             return  # a partial old DB with no files table -> nothing to index
         self.con.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path, size_bytes)")
+
+    def _migrate_to_v7(self):
+        """Add the per-project git-awareness columns + content_mtime (v0.9; idempotent; skips a partial DB with no projects table)."""
+        tables = {r["name"] for r in self.con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "projects" not in tables:
+            return  # a partial old DB with no projects table -> nothing to alter
+        existing = {r["name"] for r in self.con.execute("PRAGMA table_info(projects)")}
+        for name, decl in (("git_branch", "TEXT"), ("git_head", "TEXT"),
+                           ("git_dirty", "INTEGER DEFAULT 0"), ("git_ahead", "INTEGER DEFAULT 0"),
+                           ("git_last_commit", "INTEGER"), ("content_mtime", "REAL")):
+            if name not in existing:
+                self.con.execute(f"ALTER TABLE projects ADD COLUMN {name} {decl}")
     # ------------------------------------------------------------------------ #
 
     # -- Scans --------------------------------------------------------------- #
@@ -246,6 +261,12 @@ class Database(AnalyticsMixin):
             "is_symlink": 1 if record.get("is_symlink") else 0,
             "symlink_target": record.get("symlink_target"),
             "reclaimable_bytes": record.get("reclaimable_bytes", 0),
+            "git_branch": record.get("git_branch"),
+            "git_head": record.get("git_head"),
+            "git_dirty": 1 if record.get("git_dirty") else 0,
+            "git_ahead": record.get("git_ahead", 0) or 0,
+            "git_last_commit": record.get("git_last_commit"),
+            "content_mtime": record.get("content_mtime"),
             "scan_id": scan_id,
             "now": now,
         }
@@ -255,11 +276,13 @@ class Database(AnalyticsMixin):
             """
             INSERT INTO projects (
                 path, language, category, confidence, frameworks, markers, breakdown, file_count, size_bytes, dependency_count, parent_path, role, is_symlink, symlink_target, reclaimable_bytes,
+                git_branch, git_head, git_dirty, git_ahead, git_last_commit, content_mtime,
                 first_seen, updated_at, last_scan_id
             ) VALUES (
                 :path, :language, :category, :confidence, :frameworks, :markers, :breakdown,
                 :file_count, :size_bytes, :dependency_count,
                 :parent_path, :role, :is_symlink, :symlink_target, :reclaimable_bytes,
+                :git_branch, :git_head, :git_dirty, :git_ahead, :git_last_commit, :content_mtime,
                 :now, :now, :scan_id
             )
             ON CONFLICT(path) DO UPDATE SET
@@ -277,6 +300,12 @@ class Database(AnalyticsMixin):
                 is_symlink        = excluded.is_symlink,
                 symlink_target    = excluded.symlink_target,
                 reclaimable_bytes = excluded.reclaimable_bytes,
+                git_branch        = excluded.git_branch,
+                git_head          = excluded.git_head,
+                git_dirty         = excluded.git_dirty,
+                git_ahead         = excluded.git_ahead,
+                git_last_commit   = excluded.git_last_commit,
+                content_mtime     = excluded.content_mtime,
                 updated_at        = excluded.updated_at,
                 last_scan_id      = excluded.last_scan_id
             """,
@@ -545,6 +574,7 @@ class Database(AnalyticsMixin):
         data["markers"] = _loads(data.get("markers"))
         data["breakdown"] = _loads_breakdown(data.get("breakdown"))
         data["is_symlink"] = bool(data.get("is_symlink"))
+        data["git_dirty"] = bool(data.get("git_dirty"))
         data["user_confirmed"] = bool(data.get("user_confirmed"))
         data["override_frameworks"] = _loads(data.get("override_frameworks"))
         data["dependencies"] = [d["name"] for d in self.get_dependencies(data["id"])]

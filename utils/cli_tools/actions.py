@@ -13,6 +13,8 @@ from rich.table import Table
 
 from db_tools import manager as db_manager
 import report
+import gitinfo
+import insight
 from scanner import _human_size
 from cli_tools.ui import _menu, ask_dir, _pause, _qstyle
 
@@ -28,12 +30,13 @@ def do_browse(db_path):
             print("No matching projects.")
             return
         table = Table(title=f"{len(projects)} project(s)", box=box.ROUNDED, header_style="bold cyan")
-        for col in ("path", "language", "category", "conf", "files", "deps"):
+        for col in ("path", "language", "category", "conf", "files", "deps", "git"):
             table.add_column(col, overflow="fold")
         for p in projects:
             table.add_row(
                 p["path"], str(p["language"]), str(p["category"]),
                 f"{p['confidence']:.2f}", str(p["file_count"]), str(len(p["dependencies"])),
+                gitinfo.badge_from_row(p),
             )
         print(table)
 
@@ -53,6 +56,8 @@ def do_browse(db_path):
                     "Dependency conflicts (shareable-venv check)",
                     "Storage analysis (largest projects / files / dirs)",
                     "Security findings (secrets)",
+                    "Git: at-risk projects (uncommitted / unpushed / stale)",
+                    "Git: repositories worth `git gc` (reclaim .git bloat)",
                     "Export report (Markdown / JSON)",
                     "Delete a project",
                     "Back",
@@ -252,6 +257,41 @@ def do_browse(db_path):
                         loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
                         t.add_row(str(f["severity"]), str(f["kind"]), str(f["rule"]), loc, str(f["detail"]))
                     print(t)
+
+            elif action.startswith("Git: at-risk"):
+                risky = insight.at_risk_projects(db)
+                if not risky:
+                    print("No at-risk repositories -> everything committed, pushed, and recently touched.")
+                else:
+                    t = Table(title=f"{len(risky)} at-risk repositor(y/ies)", box=box.ROUNDED, header_style="bold cyan")
+                    for col in ("path", "language", "risks"):
+                        t.add_column(col, overflow="fold")
+                    for r in risky:
+                        t.add_row(r["path"], str(r["language"]), ", ".join(r["risks"]))
+                    print(t)
+
+            elif action.startswith("Git: repositories worth"):
+                recs = insight.git_gc_recommendations(db)
+                if not recs["items"]:
+                    print("No repositories carry enough git bloat to bother with `git gc`.")
+                else:
+                    t = Table(title=f"{len(recs['items'])} repo(s) - ~{_human_size(recs['total_reclaimable'])} reclaimable via git gc",
+                              box=box.ROUNDED, header_style="bold cyan")
+                    for col in ("repository", "reclaimable (est.)", ".git total"):
+                        t.add_column(col, overflow="fold")
+                    for it in recs["items"][:30]:
+                        t.add_row(it["path"], _human_size(it["reclaimable"]), _human_size(it["total"]))
+                    print(t)
+                    if questionary.confirm(
+                            f"Run `git gc` on these {len(recs['items'])} repo(s) now? (safe - it never touches your commits/branches)",
+                            default=False, style=_qstyle).ask():
+                        from reclaimer import run_git_gc
+                        res = run_git_gc([it["path"] for it in recs["items"]])
+                        msg = (f"Ran git gc on [bold]{len(res['ran'])}[/] repo(s), "
+                               f"freed [bold]{_human_size(res['freed_bytes'])}[/].")
+                        if res["failed"]:
+                            msg += f"\n[yellow]{len(res['failed'])} failed.[/]"
+                        print(Panel(msg, title="git gc", style="green"))
 
             elif action == "Export report (Markdown / JSON)":
                 fmt_choice = _menu("Format:", choices=["Markdown", "JSON", "Back"])

@@ -58,8 +58,11 @@ Working today:
 
 Planned:
 
-* Deeper security scanning (more secret detectors, richer audit integration)
-* Automated organisation suggestions
+* **Archive & reclaim** - recommend pushing stale repositories to a private remote, then (safely, only once
+  everything is backed up) removing them locally to free space while preserving the project
+* **Shell companion** (v1.0) - an installed `mnemc` subcommand CLI, a git-style shell-prompt status light
+  (green = up to date / amber = changes / red = vulnerabilities), and the web dashboard as a report surface
+* Web dashboard git columns; deeper security scanning (git-history secret scan, more detectors)
 
 ---
 
@@ -67,10 +70,12 @@ Planned:
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-Active development, currently at **v0.5**. On top of the v0.4 line (recognition, review/override,
-reclaimable-space + cleanup, dependency overlap, storage analysis), v0.5 adds **dependency
-intelligence** (version-aware conflict / shareable-venv checks) and the **MnemoScan** security layer
-(masked secret detection + an optional pip-audit / npm audit). See the roadmap.
+Active development, at **v0.9 - the git-aware workspace**: per-project git status (branch / clean-dirty /
+ahead-behind), **incremental scans** (unchanged projects are skipped via git commit / mtime), a "what
+changed since last save" diff, at-risk flags (uncommitted / unpushed / stale), a `git gc` reclaim
+recommendation, and exposed-`.env` detection. Built on v0.5 (dependency intelligence + the **MnemoScan**
+security layer), the v0.6 UI overhaul, an opt-in **AI arbiter** (v0.8), and a parallelised scanner. See
+the roadmap.
 
 ---
 
