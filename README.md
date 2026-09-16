@@ -58,8 +58,14 @@ Working today:
 
 Planned:
 
-* Deeper security scanning (more secret detectors, richer audit integration)
-* Automated organisation suggestions
+* **Git-aware workspace** (v0.9) - per-project git status (branch / clean-dirty / ahead-behind / stale),
+  git-powered change detection ("what changed since last scan"), plus `.git` bloat and `.env` / ignore
+  hygiene checks
+* **Archive & reclaim** - recommend pushing stale repositories to a private remote, then (safely, only once
+  everything is backed up) removing them locally to free space while preserving the project
+* **Shell companion** (v1.0) - an installed `mnemc` subcommand CLI, a git-style shell-prompt status light
+  (green = up to date / amber = changes / red = vulnerabilities), and the web dashboard as a report surface
+* Deeper security scanning (git-history secret scan, more detectors, richer audit integration)
 
 ---
 
@@ -67,10 +73,11 @@ Planned:
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-Active development, currently at **v0.5**. On top of the v0.4 line (recognition, review/override,
-reclaimable-space + cleanup, dependency overlap, storage analysis), v0.5 adds **dependency
-intelligence** (version-aware conflict / shareable-venv checks) and the **MnemoScan** security layer
-(masked secret detection + an optional pip-audit / npm audit). See the roadmap.
+Active development, at **v0.8**. Since the v0.5 line (dependency intelligence + the **MnemoScan** security
+layer) and the v0.6 UI overhaul: report export; an opt-in **AI arbiter** for low-confidence projects
+(local-first, Ollama by default); a **parallelised scanner** with auto-tuning + a progress bar; and a
+package tidy-up (`cli.py` is now the entry point at the repo root, with the engine modules under `utils/`).
+**v0.9 - the git-aware workspace** - is in progress. See the roadmap.
 
 ---
 

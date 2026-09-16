@@ -105,3 +105,31 @@ def create_uni_venv(venv_path, dependencies=()):
         return {"created": True, "path": venv_path, "installed": len(deps), "failed": [], "error": None}
     # pip resolves the whole set at once, so a conflict fails the batch -> report it, the venv still exists.
     return {"created": True, "path": venv_path, "installed": 0, "failed": deps, "error": (proc.stderr or "").strip()[-500:]}
+
+
+def run_git_gc(repo_paths, aggressive=False):
+    """
+    Run `git gc` on each repo to compact + prune its .git object store, reclaiming disk WITHOUT touching
+    reachable history (branches/tags/commits are safe). aggressive=True adds --prune=now, which also drops
+    the reflog grace window -> maximum reclaim, but genuinely-dangling commits become unrecoverable.
+
+    Returns {ran: [path,...], freed_bytes: int, failed: [(path, msg),...]}.
+    """
+    from gitinfo import git_dir_size  # local import -> git layer stays optional
+    cmd = ["git", "gc"] + (["--prune=now"] if aggressive else [])
+    ran, failed, freed = [], [], 0
+    for path in repo_paths:
+        before = git_dir_size(path)
+        try:
+            proc = subprocess.run(cmd, cwd=path, capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.SubprocessError) as e:
+            failed.append((path, str(e)))
+            continue
+        if proc.returncode != 0:
+            failed.append((path, (proc.stderr or "").strip()[-300:]))
+            continue
+        after = git_dir_size(path)
+        if before and after:
+            freed += max(0, before["total_bytes"] - after["total_bytes"])
+        ran.append(path)
+    return {"ran": ran, "freed_bytes": freed, "failed": failed}

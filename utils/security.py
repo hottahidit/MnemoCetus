@@ -36,6 +36,30 @@ BINARY_EXTS = {
 MAX_FILE_BYTES = 1_000_000   # skip anything bigger -> a real secret sits in small config/source files
 MAX_LINE_CHARS = 4_000       # truncate very long (e.g. minified) lines before matching, to stay fast
 
+# Config files whose EXPOSURE (present in a repo but not gitignored, so committable) is a leak risk.
+ENV_FILENAMES = (".env", ".env.local", ".env.development", ".env.production", ".env.staging", ".env.prod")
+
+
+def check_env_exposure(directory, is_repo):
+    """
+    Flag root-level .env files a git repo is NOT ignoring -> they risk being committed with their secrets.
+
+    Returns MnemoScan findings (same shape as scan_secrets); empty for non-repos (the risk is git-specific).
+    """
+    if not is_repo:
+        return []
+    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    findings = []
+    for name in ENV_FILENAMES:
+        path = os.path.join(directory, name)
+        if os.path.isfile(path) and not gitinfo.is_ignored(directory, name):
+            findings.append({
+                "kind": "config", "rule": "exposed dotenv", "severity": "high",
+                "path": path, "line": 0,
+                "detail": f"{name} is not gitignored -> at risk of being committed with its secrets",
+            })
+    return findings
+
 
 def _mask(secret):
     """Redact a matched secret for storage/display -> keep the first 4 chars, star the rest (capped)."""

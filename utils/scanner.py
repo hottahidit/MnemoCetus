@@ -180,9 +180,10 @@ class Scanner:
         self._name_rules, self._path_rules = compile_exclude_rules(exclude_list)
         # Memoisation store for classify() -> abs path -> (mtime, result).
         self._cache = {}
-        # File sizes captured during scan() (path -> size) so downstream metrics / inventory reuse them
-        # instead of re-stat-ing the whole tree.
+        # File sizes + mtimes captured during scan() (path -> size / mtime) so downstream metrics,
+        # inventory, and change-detection reuse them instead of re-stat-ing the whole tree.
         self._sizes = {}
+        self._mtimes = {}
 
     def scan(self, directory, confirm_filters=True):
         """
@@ -199,7 +200,8 @@ class Scanner:
         files_scanned = 0
         bytes_scanned = 0
         file_paths = []
-        self._sizes = {}  # reset per scan; each file's size is captured once, below
+        self._sizes = {}   # reset per scan; each file's size + mtime is captured once, below
+        self._mtimes = {}
 
         # Check if the directory exists and is accessible (error handling)
         if directory is None or not os.path.exists(directory):
@@ -229,27 +231,29 @@ class Scanner:
                         continue
 
                     try:
-                        size = os.path.getsize(file_path)
+                        st = os.stat(file_path)      # one stat -> both size and mtime, no second syscall
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
                         continue
                     file_paths.append(file_path)
-                    self._sizes[file_path] = size    # captured once -> reused for metrics + inventory
+                    self._sizes[file_path] = st.st_size      # captured once -> reused for metrics + inventory
+                    self._mtimes[file_path] = st.st_mtime    # newest mtime feeds content-based change detection
                     files_scanned += 1
-                    bytes_scanned += size
+                    bytes_scanned += st.st_size
         else:
             for root, dirs, files in os.walk(directory):
                 for file in files:
                     file_path = os.path.normpath(os.path.join(root, file))
                     try:
-                        size = os.path.getsize(file_path)
+                        st = os.stat(file_path)      # one stat -> both size and mtime, no second syscall
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
                         continue
                     file_paths.append(file_path)
-                    self._sizes[file_path] = size    # captured once -> reused for metrics + inventory
+                    self._sizes[file_path] = st.st_size      # captured once -> reused for metrics + inventory
+                    self._mtimes[file_path] = st.st_mtime    # newest mtime feeds content-based change detection
                     files_scanned += 1
-                    bytes_scanned += size
+                    bytes_scanned += st.st_size
 
         return file_paths
 
@@ -554,8 +558,37 @@ def _project_record(path, info):
         "symlink_target": info["symlink_target"],
     }
 
+def _load_baseline(baseline_db):
+    """
+    Load a prior scan's per-project state for incremental scanning ->
+    {project_path: {"sig": change_signature, "marks": [...], "findings": [...]}}.
+
+    Only projects with a STABLE signature (a clean repo pinned to a commit, or a known mtime) are kept, so
+    a dirty / unknown project is never a skip candidate. Returns {} when there is no readable baseline.
+    """
+    if not baseline_db or not os.path.exists(baseline_db):
+        return {}
+    from db_tools import manager as db_manager
+    import gitinfo
+    try:
+        db = db_manager.Database(baseline_db)
+    except Exception:  # noqa: BLE001 -> a missing/corrupt baseline simply disables incremental
+        return {}
+    out = {}
+    try:
+        for p in db.all_projects():
+            sig = gitinfo.change_signature(p.get("git_head"), p.get("git_dirty"), p.get("content_mtime"))
+            if sig is None:
+                continue
+            out[p["path"]] = {"sig": sig, "marks": db.get_marks(p["id"]),
+                              "findings": db.get_security_findings(p["id"])}
+    finally:
+        db.close()
+    return out
+
+
 def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True, security=True,
-                 progress=None, workers=None):
+                 progress=None, workers=None, baseline_db=None):
     """
     Scan 'directory', classify every project under it, and store the lot in SQLite.
 
@@ -574,29 +607,54 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
         progress (callable): optional progress(done, total) callback, called once with (0, total) then
             after each project is stored -> lets the CLI draw a real progress bar.
         workers (int): thread-pool size for the per-project read phase (default: scaled to CPU count).
+        baseline_db (str): optional path to a prior database (e.g. the long-term one). Projects that are
+            provably unchanged since that baseline (a clean git repo at the same commit, or an unchanged
+            mtime) reuse its stored marks + security findings and skip the two heavy passes -> incremental.
 
     Returns:
         (scan_id, project_count): the stored scan's id and how many projects landed.
     """
     from db_tools import manager as db_manager  # local import -> the DB layer is optional for plain scanning
     from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
-    from security import scan_secrets  # local import -> keep the security layer out of plain scanning
+    from security import scan_secrets, check_env_exposure  # local import -> keep the security layer out of plain scanning
     from concurrent.futures import ThreadPoolExecutor
+    import gitinfo  # local import -> git awareness is optional
 
     sc = _default()
     files = sc.scan(directory, confirm_filters=confirm_filters)
     rels = sc.resolve_relationships(files, mode)
-    sizes = sc._sizes  # captured during the walk above -> reused, never re-stat-ed
+    sizes, mtimes = sc._sizes, sc._mtimes  # captured during the walk above -> reused, never re-stat-ed
+    baseline = _load_baseline(baseline_db)  # {path: {sig, marks, findings}} for incremental skipping ({} if none)
 
     def _prepare(item):
         """Read-only, independent per-project work -> safe to run in parallel."""
         project, info = item
-        marks = _collect_marks(project, sc._name_rules, sc._path_rules)  # size regenerable bloat
         record = _project_record(project, info)
-        record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
         inventory = _collect_files(project, sc._name_rules, sc._path_rules, files, sizes)  # file list
-        findings = scan_secrets(project, sc._name_rules, sc._path_rules) if security else []
-        return record, marks, inventory, findings
+        # Git + content signals -> feed change detection, the diff, the at-risk flags, and the v1.0 light.
+        gi = gitinfo.status(project)
+        content_mtime = max((mtimes.get(p, 0.0) for p, _ in inventory), default=0.0) or None
+        record["git_branch"] = gi.get("branch")
+        record["git_head"] = gi.get("head")
+        record["git_dirty"] = gi.get("dirty", False)
+        record["git_ahead"] = gi.get("ahead", 0)
+        record["git_last_commit"] = gi.get("last_commit_ts")
+        record["content_mtime"] = content_mtime
+        # Incremental: if this project is provably unchanged since the baseline, reuse its stored marks +
+        # findings and skip the two heavy passes (the bloat walk and reading every file for secrets).
+        sig = gitinfo.change_signature(gi.get("head"), gi.get("dirty"), content_mtime)
+        prior = baseline.get(project)
+        if prior is not None and sig is not None and sig == prior["sig"]:
+            marks, reused = prior["marks"], True
+            findings = prior["findings"] if security else []
+        else:
+            marks = _collect_marks(project, sc._name_rules, sc._path_rules)  # size regenerable bloat
+            findings = scan_secrets(project, sc._name_rules, sc._path_rules) if security else []
+            if security and gi.get("is_repo"):
+                findings += check_env_exposure(project, True)  # + exposed-.env hygiene (git-specific)
+            reused = False
+        record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
+        return record, marks, inventory, findings, reused
 
     items = list(rels.items())
     total = len(items)
@@ -614,8 +672,11 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
         if progress:
             progress(0, total)
         # Parallel read (threads) -> serial write (this thread). ex.map preserves input order.
+        skipped = 0  # projects reused from the baseline (unchanged) rather than re-analysed
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for record, marks, inventory, findings in ex.map(_prepare, items):
+            for record, marks, inventory, findings, reused in ex.map(_prepare, items):
+                if reused:
+                    skipped += 1
                 pid = db.upsert_project(record, scan_id=scan_id)
                 # Dependencies tagged with ecosystem + declared version spec -> feeds the conflict check.
                 db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],

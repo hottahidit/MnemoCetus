@@ -244,6 +244,9 @@ def _cli():
         # Fresh temporary store -> each scan replaces the last, so it's only held until the next scan.
         if os.path.exists(session["db"]):
             os.remove(session["db"])
+        # An existing long-term DB is the baseline -> unchanged projects are reused (incremental) and we
+        # can report what changed since it. The first-ever scan has no baseline (a full scan).
+        baseline_db = permanent_db if os.path.exists(permanent_db) else None
         from rich.progress import (Progress, SpinnerColumn, TextColumn, BarColumn,
                                     MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn)
         # Indeterminate spinner during the walk (total unknown), then a real bar as projects are stored.
@@ -256,13 +259,20 @@ def _cli():
             _scan_id, count = persist_scan(directory, db_path=session["db"], mode=mode,
                                            confirm_filters=apply_filters, security=secrets,
                                            workers=rt["cfg"].get("scan_workers") or None,
-                                           progress=_on_progress)
+                                           baseline_db=baseline_db, progress=_on_progress)
         session.update(root=directory, mode=mode, security=secrets, count=count, saved=False)
         print(Panel(
             f"Scanned + held in temporary memory: [bold]{count}[/] project(s) under {directory}.\n"
             f"[dim]This lasts until your next scan. Choose 'Save this scan long-term' to keep it; "
             f"all the other features now work on this scan.[/]",
             title="Scan complete", style="green"))
+        # "What changed since your last save" -> the diff against the baseline long-term DB.
+        if baseline_db:
+            import insight
+            with db_manager.Database(session["db"]) as _cur, db_manager.Database(baseline_db) as _base:
+                _changes = insight.diff_databases(_cur, _base)
+            print(Panel(f"Since your last save: {insight.summarise_diff(_changes)}.",
+                        title="What changed", style="cyan"))
         # Opt-in: weigh in on the uncertain ones with the arbiter, then drop into review, before the user moves on.
         if rt["cfg"]["arbiter"]["enabled"] and rt["cfg"]["arbiter"]["run_after_scan"]:
             sug = _arbitrate(session["db"], ask=False)
