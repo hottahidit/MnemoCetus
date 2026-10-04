@@ -35,7 +35,7 @@
   {% else %}
   <table>
     <tr>
-      <th>path</th><th>language</th><th>category</th><th>conf.</th>
+      <th>path</th><th>language</th><th>category</th><th>git</th><th>conf.</th>
       <th>size</th><th>reclaimable</th><th>composition</th><th>recategorise</th>
     </tr>
     {% for p in projects %}
@@ -48,6 +48,7 @@
             <span class="tag" title="user-confirmed (auto guess: {{ p.auto.category }})">confirmed</span>
           {% endif %}
         </td>
+        <td class="muted">{% set gb = p | gitbadge %}{% if gb %}<code>{{ gb }}</code>{% else %}&mdash;{% endif %}</td>
         <td>{{ '%.2f' | format(p.confidence) }}</td>
         <td>{{ p.size_bytes | humansize }}</td>
         <td class="muted">{% if p.reclaimable_bytes %}{{ p.reclaimable_bytes | humansize }}{% else %}&mdash;{% endif %}</td>

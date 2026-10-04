@@ -52,7 +52,9 @@ Working today:
   version-conflict check flagging which projects could share one virtualenv vs. which clash on pins
 * **Security scan** ("MnemoScan") - flag hard-coded secrets (API keys, tokens, private keys; values
   are masked, never stored raw) during a scan, plus an optional dependency-vulnerability audit that
-  shells out to pip-audit / npm audit when they're installed
+  shells out to pip-audit / npm audit when they're installed, an optional **full git-history secret
+  scan** (catches secrets that were committed and later "removed" - they live on in history), and
+  `.env` / un-ignored-bloat hygiene checks for git repos
 * A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
   recategorisation, cleanup recommendations, dependency overlap, storage analysis, and security findings
 
@@ -65,7 +67,7 @@ Planned:
   everything is backed up) removing them locally to free space while preserving the project
 * **Shell companion** (v1.0) - an installed `mnemc` subcommand CLI, a git-style shell-prompt status light
   (green = up to date / amber = changes / red = vulnerabilities), and the web dashboard as a report surface
-* Deeper security scanning (git-history secret scan, more detectors, richer audit integration)
+* Deeper security scanning (more secret detectors, richer audit integration)
 
 ---
 
@@ -129,11 +131,13 @@ up the web dashboard in the background (best-effort) so both are usable at once.
 python utils/web/app.py        # -> http://127.0.0.1:5000
 ```
 
-Six views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
-space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions),
-**Overlap** (shared dependencies + the space a shared/hardlinked package store could reclaim + a
-version-conflict / shareable-venv check), **Storage** (largest projects / files / directories), and
-**Security** (masked secret findings + dependency vulnerabilities). The web dashboard and the advisory
+Seven views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
+space), **Projects** (filter + in-page recategorise, now with a per-project git badge), **Cleanup**
+(ranked cleanup suggestions), **Overlap** (shared dependencies + the space a shared/hardlinked package
+store could reclaim + a version-conflict / shareable-venv check), **Storage** (largest projects / files
+/ directories), **Security** (masked secret findings + dependency vulnerabilities + `.env` / ignore
+hygiene), and **Git** (at-risk projects - uncommitted / unpushed / stale - plus repos worth a
+`git gc`). The web dashboard and the advisory
 Cleanup view never delete anything - they only suggest. The one place deletion happens is the opt-in
 **Reclaimer** in the CLI, which shows a full plan and requires a typed confirmation first.
 

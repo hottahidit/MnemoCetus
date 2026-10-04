@@ -32,6 +32,8 @@
       <tr><th>parent</th><td>
         {% if p.parent_path %}<a href="{{ url_for('project_view', path=p.parent_path) }}"><code>{{ p.parent_path }}</code></a>
         {% else %}&mdash; (root){% endif %}</td></tr>
+      {% set gb = p | gitbadge %}
+      {% if gb %}<tr><th>git</th><td><code>{{ gb }}</code>{% if p.git_ahead %} <span class="muted">({{ p.git_ahead }} unpushed)</span>{% endif %}</td></tr>{% endif %}
       <tr><th>first seen</th><td class="muted">{{ p.first_seen }}</td></tr>
       <tr><th>updated</th><td class="muted">{{ p.updated_at }}</td></tr>
     </table>

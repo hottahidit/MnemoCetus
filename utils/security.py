@@ -61,6 +61,43 @@ def check_env_exposure(directory, is_repo):
     return findings
 
 
+def check_ignore_hygiene(directory, is_repo, marks):
+    """
+    Flag regenerable bloat a git repo ISN'T ignoring -> node_modules / venv / build output at risk of
+    being committed (and, when there's bloat but no .gitignore at all, the missing file itself).
+
+    'marks' are the reclaimable directories the scan already sized (see cleaner._collect_marks), so this
+    reuses that work instead of walking again. Returns MnemoScan findings; empty for non-repos.
+    """
+    if not is_repo or not marks:
+        return []
+    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    findings = []
+    unignored = []
+    for m in marks:
+        mp = m.get("path")
+        if not mp:
+            continue
+        rel = os.path.relpath(mp, directory)
+        if rel.startswith(".."):  # bloat resolved outside this project dir -> not ours to judge
+            continue
+        if not gitinfo.is_ignored(directory, rel):
+            unignored.append(m)
+            findings.append({
+                "kind": "config", "rule": "un-ignored bloat", "severity": "medium",
+                "path": mp, "line": 0,
+                "detail": f"{m.get('name') or rel} is regenerable but not gitignored -> risks being committed",
+            })
+    # If there's un-ignored bloat AND no .gitignore exists at all, name the root cause too.
+    if unignored and not os.path.isfile(os.path.join(directory, ".gitignore")):
+        findings.append({
+            "kind": "config", "rule": "missing gitignore", "severity": "low",
+            "path": os.path.join(directory, ".gitignore"), "line": 0,
+            "detail": "no .gitignore -> regenerable bloat (and secrets) can slip into commits",
+        })
+    return findings
+
+
 def _mask(secret):
     """Redact a matched secret for storage/display -> keep the first 4 chars, star the rest (capped)."""
     secret = secret.strip()
@@ -118,6 +155,81 @@ def scan_secrets(directory, name_rules, path_rules):
             except OSError:
                 continue
             findings.extend(_scan_file(path))
+    return findings
+
+
+def scan_git_history(directory, timeout=300):
+    """
+    Scan a repo's FULL git history for hard-coded secrets -> secrets that were committed and later
+    "removed" still live in the history and are the real leak. On-demand (heavier than the working-tree
+    scan), read-only, and shells out to git -> returns [] when git is absent or it isn't a repo.
+
+    Walks every blob reachable from all refs (`git rev-list --objects --all`), streams their contents in
+    one `git cat-file --batch`, and runs the same SECRET_RULES. Binary/oversized blobs are skipped and
+    findings are deduped by (rule, masked value, path), so a secret living across many commits is one
+    finding. Findings use kind 'secret-history'; detail carries the masked value + the in-history path.
+    """
+    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    if not gitinfo.git_available():
+        return []
+    listing = gitinfo._git(["rev-list", "--objects", "--all"], directory)
+    if not listing:
+        return []
+    # rev-list --objects lines are "<sha>" (commits) or "<sha> <path>" (blobs + subtrees). Keep the ones
+    # that carry a path (candidate files); cat-file --batch tells us which are actually blobs.
+    sha_path, order = {}, []
+    for ln in listing.splitlines():
+        sha, sep, path = ln.partition(" ")
+        if sep and path and sha not in sha_path:
+            sha_path[sha] = path
+            order.append(sha)
+    if not order:
+        return []
+    try:
+        proc = subprocess.run(["git", "cat-file", "--batch"], cwd=directory,
+                              input="\n".join(order).encode(), capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    data, findings, seen = proc.stdout, [], set()
+    i, n = 0, len(proc.stdout)
+    while i < n:
+        nl = data.find(b"\n", i)
+        if nl == -1:
+            break
+        parts = data[i:nl].decode("utf-8", "ignore").split(" ")
+        i = nl + 1
+        if len(parts) == 2 and parts[1] == "missing":
+            continue  # object gone (shouldn't happen for rev-list output) -> no content follows
+        if len(parts) != 3:
+            break  # malformed stream -> stop rather than misalign
+        sha, otype, size_s = parts
+        try:
+            size = int(size_s)
+        except ValueError:
+            break
+        content = data[i:i + size]
+        i += size + 1  # skip the content and its trailing newline
+        if otype != "blob":
+            continue
+        path = sha_path.get(sha, "")
+        if os.path.splitext(path)[1].lower() in BINARY_EXTS or size > MAX_FILE_BYTES:
+            continue
+        for lineno, line in enumerate(content.decode("utf-8", "ignore").splitlines(), 1):
+            if len(line) > MAX_LINE_CHARS:
+                line = line[:MAX_LINE_CHARS]
+            for rule, pattern, severity in SECRET_RULES:
+                m = pattern.search(line)
+                if m:
+                    masked = _mask(m.group(0))
+                    key = (rule, masked, path)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append({
+                        "kind": "secret-history", "rule": rule, "severity": severity,
+                        "path": os.path.join(directory, path), "line": lineno,
+                        "detail": f"{masked} (in git history: {path})",
+                    })
     return findings
 
 

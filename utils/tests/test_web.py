@@ -274,5 +274,31 @@ class TestRecategorise(WebTestCase):
         self.assertIsNone(self.get_project("/tmp/gone"))
 
 
+class TestGitView(WebTestCase):
+    def test_git_empty_state(self):
+        resp = self.client().get("/git")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"run a scan first", resp.data)
+
+    def test_git_at_risk_and_badge(self):
+        # a dirty, unpushed repo -> at-risk; a clean repo -> not listed
+        self.seed(
+            _record("/w/dirty", git_branch="main", git_head="abc1234", git_dirty=True, git_ahead=2),
+            _record("/w/clean", git_branch="main", git_head="def5678", git_dirty=False, git_ahead=0),
+        )
+        resp = self.client().get("/git")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"/w/dirty", resp.data)
+        self.assertIn(b"uncommitted", resp.data)
+        self.assertIn(b"unpushed", resp.data)
+        self.assertNotIn(b"/w/clean", resp.data)  # clean repo is not at risk
+
+    def test_projects_table_shows_git_badge(self):
+        self.seed(_record("/w/repo", git_branch="main", git_head="abc1234", git_dirty=True))
+        resp = self.client().get("/projects")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("⎇".encode(), resp.data)  # git badge glyph in the git column
+
+
 if __name__ == "__main__":
     unittest.main()

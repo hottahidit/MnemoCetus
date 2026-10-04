@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %} - Git{% endblock %}
+{% block content %}
+
+  <h2>Git workspace</h2>
+  <p class="muted">Per-project git state captured during the last scan. <strong>At-risk</strong> flags local
+     work that could be lost (uncommitted / unpushed / stale); <strong>gc candidates</strong> are repos whose
+     <code>.git</code> object store is worth compacting. Detection only &mdash; run a <code>git gc</code> or the
+     Reclaimer from the CLI to act. Exposed-<code>.env</code> and un-ignored-bloat findings live under
+     <a href="{{ url_for('security_view') }}">Security</a>.</p>
+
+  {% if not overview %}
+    <p class="muted">No database yet &mdash; run a scan first.</p>
+  {% else %}
+
+    <h3>At risk <span class="muted">({{ overview.at_risk | length }})</span></h3>
+    {% if not overview.at_risk %}
+      <p class="muted">Nothing at risk &mdash; every scanned repo is committed, pushed and recently active.</p>
+    {% else %}
+      <table>
+        <tr><th>project</th><th>language</th><th>risks</th></tr>
+        {% for p in overview.at_risk %}
+          <tr>
+            <td><a href="{{ url_for('project_view', path=p.path) }}"><code>{{ p.path }}</code></a></td>
+            <td>{{ p.language or '&mdash;' | safe }}</td>
+            <td>{% for r in p.risks %}<span class="badge {{ 'high' if r == 'uncommitted' else 'medium' if r == 'unpushed' else 'low' }}">{{ r }}</span> {% endfor %}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    <h3>Worth <code>git gc</code>
+      {% if overview.gc['items'] %}<span class="muted">(~{{ overview.gc['total_reclaimable'] | humansize }} reclaimable)</span>{% endif %}
+    </h3>
+    {% if not overview.gc['items'] %}
+      <p class="muted">No repo has enough loose-object bloat to bother compacting.</p>
+    {% else %}
+      <table>
+        <tr><th>project</th><th>reclaimable (est.)</th><th>.git total</th></tr>
+        {% for it in overview.gc['items'] %}
+          <tr>
+            <td><a href="{{ url_for('project_view', path=it.path) }}"><code>{{ it.path }}</code></a></td>
+            <td class="muted">{{ it.reclaimable | humansize }}</td>
+            <td class="muted">{{ it.total | humansize }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+  {% endif %}
+
+{% endblock %}

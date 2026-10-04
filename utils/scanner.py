@@ -616,7 +616,7 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     """
     from db_tools import manager as db_manager  # local import -> the DB layer is optional for plain scanning
     from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
-    from security import scan_secrets, check_env_exposure  # local import -> keep the security layer out of plain scanning
+    from security import scan_secrets, check_env_exposure, check_ignore_hygiene  # local import -> keep the security layer out of plain scanning
     from concurrent.futures import ThreadPoolExecutor
     import gitinfo  # local import -> git awareness is optional
 
@@ -651,7 +651,8 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
             marks = _collect_marks(project, sc._name_rules, sc._path_rules)  # size regenerable bloat
             findings = scan_secrets(project, sc._name_rules, sc._path_rules) if security else []
             if security and gi.get("is_repo"):
-                findings += check_env_exposure(project, True)  # + exposed-.env hygiene (git-specific)
+                findings += check_env_exposure(project, True)          # + exposed-.env hygiene (git-specific)
+                findings += check_ignore_hygiene(project, True, marks)  # + un-ignored regenerable bloat
             reused = False
         record["reclaimable_bytes"] = sum(m["size_bytes"] for m in marks)
         return record, marks, inventory, findings, reused

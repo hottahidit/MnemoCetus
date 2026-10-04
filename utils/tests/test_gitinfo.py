@@ -177,6 +177,51 @@ class TestRealRepos(unittest.TestCase):
         # non-repo -> nothing (risk is git-specific)
         self.assertEqual(security.check_env_exposure(d, False), [])
 
+    def test_ignore_hygiene(self):
+        d = os.path.join(self.tmp, "repo")
+        _make_repo(d)
+        node = os.path.join(d, "node_modules")
+        os.makedirs(node)
+        marks = [{"name": "node_modules", "path": node, "size_bytes": 1024}]
+        # bloat present, not ignored, no .gitignore -> flagged un-ignored + missing gitignore
+        f = security.check_ignore_hygiene(d, True, marks)
+        rules = {x["rule"] for x in f}
+        self.assertIn("un-ignored bloat", rules)
+        self.assertIn("missing gitignore", rules)
+        # once gitignored -> nothing flagged
+        with open(os.path.join(d, ".gitignore"), "w") as fh:
+            fh.write("node_modules/\n")
+        self.assertEqual(security.check_ignore_hygiene(d, True, marks), [])
+        # non-repo, or no marks -> nothing (nothing to judge)
+        self.assertEqual(security.check_ignore_hygiene(d, False, marks), [])
+        self.assertEqual(security.check_ignore_hygiene(d, True, []), [])
+
+    def test_scan_git_history(self):
+        d = os.path.join(self.tmp, "repo")
+        _make_repo(d)
+        # commit a secret, then "remove" it in a later commit -> gone from the working tree, not history
+        secret = os.path.join(d, "config.py")
+        with open(secret, "w") as fh:
+            fh.write('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        _run_git(d, "add", "-A")
+        _run_git(d, "commit", "-m", "add config")
+        os.remove(secret)
+        _run_git(d, "add", "-A")
+        _run_git(d, "commit", "-m", "remove config")
+        # working-tree scan is clean now; history scan still catches it
+        self.assertEqual(security.scan_secrets(d, set(), set()), [])
+        hist = security.scan_git_history(d)
+        self.assertTrue(any(f["rule"] == "AWS access key id" for f in hist))
+        f = next(f for f in hist if f["rule"] == "AWS access key id")
+        self.assertEqual(f["kind"], "secret-history")
+        self.assertIn("config.py", f["detail"])
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", f["detail"])  # masked, never raw
+
+    def test_scan_git_history_non_repo(self):
+        d = os.path.join(self.tmp, "plain")
+        os.makedirs(d)
+        self.assertEqual(security.scan_git_history(d), [])
+
     def test_run_git_gc(self):
         d = os.path.join(self.tmp, "repo")
         _make_repo(d)

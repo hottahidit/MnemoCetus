@@ -415,3 +415,29 @@ def do_audit():
     for f in findings:
         table.add_row(str(f["severity"]), str(f["rule"]), str(f["detail"]))
     print(table)
+
+
+def do_history_scan():
+    directory = ask_dir("Repository to scan (full git history):")
+    if not directory:
+        return
+    if not gitinfo.status(directory).get("is_repo"):
+        print("Not a git repository -> the history scan needs one (the plain scan already covers the files).")
+        return
+    from security import scan_git_history  # lazy: shells out to git, walks every commit
+    print("[dim]Walking every commit in history -> this can take a moment on a large repo...[/]")
+    findings = scan_git_history(directory)
+    if not findings:
+        print("No secrets found anywhere in this repo's history. ✓")
+        return
+    table = Table(title=f"Secrets in git history -> {directory}", box=box.ROUNDED, header_style="bold cyan")
+    for col in ("severity", "rule", "detail"):
+        table.add_column(col, overflow="fold")
+    for f in findings:
+        table.add_row(str(f["severity"]), str(f["rule"]), str(f["detail"]))
+    print(table)
+    print(Panel(
+        f"[bold]{len(findings)}[/] secret(s) are present in the git history (not just the working tree).\n"
+        "[dim]Removing a file in a later commit does NOT remove it from history. To purge, rewrite history\n"
+        "with git-filter-repo (or BFG), then rotate the exposed credentials.[/]",
+        title="Git history", style="yellow"))

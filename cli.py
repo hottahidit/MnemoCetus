@@ -15,14 +15,14 @@ from rich import print
 from rich.panel import Panel
 from rich.rule import Rule
 
-from scanner import (
-    scan_directory, classify_directory, resolve_directory_relationships,
-    persist_scan, describe, _is_recognised,
-    _is_excluded, _default, _human_size,
-)
+from scanner import ( # type: ignore
+    scan_directory, classify_directory, resolve_directory_relationships, #type: ignore
+    persist_scan, describe, _is_recognised, #type: ignore
+    _is_excluded, _default, _human_size, #type: ignore
+) #type: ignore
 
-from cli_tools.ui import _qstyle, _menu, ask_dir, ask_mode, _pause
-from cli_tools.actions import do_browse, do_review, do_audit
+from cli_tools.ui import _qstyle, _menu, ask_dir, ask_mode, _pause  #type: ignore
+from cli_tools.actions import do_browse, do_review, do_audit, do_history_scan #type: ignore
 
 
 # --- debug / CLI helpers ------------------------------------------------- #
@@ -648,6 +648,7 @@ def _cli():
                 "Review low-confidence projects",
                 "AI: re-classify uncertain projects",
                 "Dependency vulnerability audit (optional)",
+                "Git history secret scan (optional)",
                 "Reclaimer (delete bloat / build a uni-venv)",
                 "Scan a different directory",
                 "Open a saved database",
@@ -674,6 +675,9 @@ def _cli():
             _pause()
         elif action == "Dependency vulnerability audit (optional)":
             do_audit()
+            _pause()
+        elif action == "Git history secret scan (optional)":
+            do_history_scan()
             _pause()
         elif action.startswith("Reclaimer"):
             do_reclaim()

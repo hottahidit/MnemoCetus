@@ -1,12 +1,13 @@
 # Flask web app for MnemoCetus (v0.4 - the browser front-end over the "MnemoIndex" store and "MnemoClean" cleanup).
 #
-# Six views:
+# Seven views:
 #   /          -> statistics dashboard (totals, by-language / by-category, confidence spread, reclaimable space)
 #   /projects  -> filterable database viewer with recategorisation, which POSTs into db_manager.set_override / approve / clear_override / delete_project.
 #   /cleanup   -> reclaimable-space cleanup recommendations (advisory only; never deletes anything).
 #   /overlap   -> cross-project dependency overlap + rough env savings, and the version-conflict / shareable-venv check.
 #   /storage   -> storage analysis (largest projects / files / directories + workspace rollup).
-#   /security  -> MnemoScan findings: hard-coded secrets (masked) and optional dependency vulnerabilities.
+#   /security  -> MnemoScan findings: hard-coded secrets (masked), optional dependency vulnerabilities, .env / ignore hygiene.
+#   /git       -> git workspace: at-risk projects (uncommitted / unpushed / stale) + repos worth a `git gc`.
 #
 # NOTE: this is a local, single-user tool, so the mutating POST routes don't carry CSRF tokens.
 
@@ -23,6 +24,8 @@ if UTILS_DIR not in sys.path:
 from db_tools import manager as db_manager  # noqa: E402
 import report  # noqa: E402
 import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
+import gitinfo  # noqa: E402  (per-project git badge)
+import insight  # noqa: E402  (at-risk projects + git-gc recommendations)
 
 # The categories offered in the recategorise dropdown (mirrors the CLI review choices).
 CATEGORIES = ["backend", "frontend", "full stack", "automation", "library", "cli", "desktop", "application", "data/ml", "other"]
@@ -81,6 +84,16 @@ def _security(db_path):
         return None
     with utils.open_db(db_path) as db:
         return db.security_summary()
+
+def _git_overview(db_path):
+    """Workspace git rollup: projects at risk (uncommitted/unpushed/stale) + repos worth `git gc`."""
+    if not os.path.exists(db_path):
+        return None
+    with utils.open_db(db_path) as db:
+        return {
+            "at_risk": insight.at_risk_projects(db),
+            "gc": insight.git_gc_recommendations(db),
+        }
 
 def _project_detail(db_path, path):
     """Everything about one project (deps + marks + security findings), or None if it isn't in the db."""
@@ -145,6 +158,7 @@ def create_app(db_path=None):
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path or db_manager.DEFAULT_DB_PATH
     app.jinja_env.filters["humansize"] = utils.human_size
+    app.jinja_env.filters["gitbadge"] = gitinfo.badge_from_row
 
     def current_db():
         return app.config["DB_PATH"]
@@ -227,6 +241,14 @@ def create_app(db_path=None):
             "security.html",
             db_path=os.path.normpath(current_db()),
             summary=_security(current_db()),
+        )
+
+    @app.route("/git")
+    def git_view():
+        return render_template(
+            "git.html",
+            db_path=os.path.normpath(current_db()),
+            overview=_git_overview(current_db()),
         )
 
     @app.route("/export")
