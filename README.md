@@ -217,4 +217,5 @@ MnemoCetus aims to become a developer workspace assistant that:
 ## LICENSE
 
 I am an (self-proclaimed) intermediate student developer looking to further their skills with this project. Feel free to use my code however you would like!
+However, please link back to this repository or credit me.
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
