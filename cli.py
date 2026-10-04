@@ -7,6 +7,11 @@
 # IMPORTS
 import os
 import sys
+import faulthandler
+
+# Dump a Python traceback (per thread) if the interpreter ever hits a fatal signal (e.g. a segfault in a
+# C extension) -> turns an opaque "segmentation fault (core dumped)" into a pinpointed stack. Cheap + safe.
+faulthandler.enable()
 
 # The engine modules live in utils/; put that on the import path before importing them (mirrors web/app.py).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils"))
@@ -22,7 +27,7 @@ from scanner import ( # type: ignore
 ) #type: ignore
 
 from cli_tools.ui import _qstyle, _menu, ask_dir, ask_mode, _pause  #type: ignore
-from cli_tools.actions import do_browse, do_review, do_audit, do_history_scan #type: ignore
+from cli_tools.actions import do_browse, do_review, do_audit, do_history_scan, ask_scan_scope, do_file_scan #type: ignore
 
 
 # --- debug / CLI helpers ------------------------------------------------- #
@@ -235,6 +240,14 @@ def _cli():
             return
         if not os.path.isdir(directory):
             print(f"'{directory}' isn't a directory.")
+            return
+        # Scope: the whole directory (normal project scan) or a hand-picked set of files.
+        scope = ask_scan_scope(directory)
+        if scope is None:  # cancelled / nothing picked -> back to the menu
+            return
+        if scope[0] == "files":  # targeted secret + inventory scan over the picked files (display-only)
+            do_file_scan(directory, scope[1])
+            _pause()
             return
         mode = ask_mode()
         if not mode or mode == "__back__":  # "Back" (or cancel) -> no scan, return to the menu

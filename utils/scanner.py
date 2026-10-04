@@ -7,6 +7,7 @@
 # IMPORTS
 from rich import print
 import os
+import stat
 
 # The classification engine (Scanner.detect delegates the "what kind of project" work to these).
 from classifier import (
@@ -235,6 +236,8 @@ class Scanner:
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
                         continue
+                    if not stat.S_ISREG(st.st_mode):  # sockets / FIFOs / devices (e.g. a Chrome profile's
+                        continue                       # SingletonSocket) -> never size or read them
                     file_paths.append(file_path)
                     self._sizes[file_path] = st.st_size      # captured once -> reused for metrics + inventory
                     self._mtimes[file_path] = st.st_mtime    # newest mtime feeds content-based change detection
@@ -248,6 +251,8 @@ class Scanner:
                         st = os.stat(file_path)      # one stat -> both size and mtime, no second syscall
                     except (OSError, PermissionError):
                         print(f"Error accessing file: {file_path}, skipping... (Permission denied or file not found)")
+                        continue
+                    if not stat.S_ISREG(st.st_mode):  # sockets / FIFOs / devices -> never size or read them
                         continue
                     file_paths.append(file_path)
                     self._sizes[file_path] = st.st_size      # captured once -> reused for metrics + inventory

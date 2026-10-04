@@ -16,3 +16,7 @@ coverage/
 .next/
 .nuxt/
 .cache/
+# OS / application data, not code projects. Snap keeps per-user app data for
+# Chromium, neovim, etc. under ~/snap/<app>/ - including full browser profiles
+# stuffed with sockets, caches and lock files - so skip the whole tree.
+snap/

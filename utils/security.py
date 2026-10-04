@@ -6,6 +6,7 @@
 import os
 import re
 import json
+import stat
 import shutil
 import subprocess
 
@@ -150,9 +151,12 @@ def scan_secrets(directory, name_rules, path_rules):
             if os.path.splitext(f)[1].lower() in BINARY_EXTS:
                 continue
             try:
-                if os.path.getsize(path) > MAX_FILE_BYTES:
-                    continue
+                st = os.stat(path)
             except OSError:
+                continue
+            # Only ever open regular files -> reading a socket/FIFO (e.g. a Chrome profile's
+            # SingletonSocket) could block a worker thread forever; skip them and oversized files.
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
                 continue
             findings.extend(_scan_file(path))
     return findings

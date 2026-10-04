@@ -113,9 +113,14 @@ Run the interactive tool:
 python cli.py
 ```
 
-You **scan a directory first** - choosing how nested projects are handled (CLASSIFY / SKIP / MERGE /
-SPLIT, each with an inline description on highlight and a recommended default). The scan (which also
-flags secrets) is **auto-held in a temporary database** until your next scan; you can then **save it
+You **scan a directory first**, then choose its **scope** - the whole directory (a normal project
+scan), or a **hand-picked set of files** (a tree picker, glob patterns, or explicit paths; files can
+come from different subfolders without scanning the parent). A hand-picked set runs a **targeted,
+display-only scan** - MnemoScan secrets plus a size inventory, with nothing written to the database,
+since a loose file set isn't a project. A whole-directory scan then asks how nested projects are
+handled (CLASSIFY / SKIP / MERGE / SPLIT, each with an inline description on highlight and a
+recommended default). The scan (which also flags secrets) is **auto-held in a temporary database**
+until your next scan; you can then **save it
 long-term** - tick which projects to keep, and they're **merged** into the database (it accumulates
 across scans and keeps projects nested inside one another consistent). Once scanned, the rest opens
 up: **explore this scan** (list/search projects,

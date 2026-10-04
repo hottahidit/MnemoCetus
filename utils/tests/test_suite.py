@@ -168,6 +168,16 @@ class TestScanDirectory(ScannerTestCase):
         self.assertEqual(len(first), len(second))
         self.assertEqual(len(first), 2)
 
+    def test_default_list_excludes_snap_app_data(self):
+        # Snap stores app data (Chromium / neovim profiles, full of caches & sockets) under ~/snap/<app>/.
+        # The SHIPPED default exclude list must prune the whole tree so it's never mistaken for a project.
+        touch(self.path("src", "main.py"))
+        touch(self.path("snap", "chromium", "common", "chromium", "Cookies"))
+        touch(self.path("snap", "nvim", "current", "init.vim"))
+        files = scanner.scan_directory(self.tmp)  # exclude_list=None -> the shipped default list
+        self.assertFalse(any(f"{os.sep}snap{os.sep}" in f for f in files))
+        self.assertTrue(any(f.endswith("main.py") for f in files))
+
     def test_confirm_filters_false_bypasses_everything(self):
         self._build_tree()
         files = scanner.scan_directory(self.tmp, confirm_filters=False)

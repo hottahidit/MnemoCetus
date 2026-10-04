@@ -5,6 +5,7 @@
 # they live apart from cli.py's session/rt-bound flows. cli.py imports and dispatches to them.
 
 import os
+import stat
 
 import questionary
 from rich import print, box
@@ -441,3 +442,188 @@ def do_history_scan():
         "[dim]Removing a file in a later commit does NOT remove it from history. To purge, rewrite history\n"
         "with git-filter-repo (or BFG), then rotate the exposed credentials.[/]",
         title="Git history", style="yellow"))
+
+
+# --- Scan scope: cherry-pick what to scan inside a directory ------------- #
+# "Scan a directory" can mean the whole tree (a normal project scan) or a hand-picked set of files.
+# A loose file set isn't a "project" (no classification / marks / deps make sense), so the file path
+# runs the per-file passes only -> MnemoScan secrets + a size inventory -> and is DISPLAY-ONLY.
+
+def _enumerate_scannable(directory, cap=400):
+    """
+    Walk 'directory' honouring the scan's excludes, skipping hidden DIRS and non-regular files (sockets /
+    FIFOs / devices), but KEEPING hidden files like .env (that's where secrets hide). Returns a sorted
+    list of paths relative to 'directory', or None if there are more than 'cap' (too many for a tree).
+    """
+    from scanner import _default, _is_excluded
+    sc = _default()
+    nr, pr = sc._name_rules, sc._path_rules
+    files = []
+    for root, dirs, fs in os.walk(directory):
+        dirs[:] = [d for d in dirs
+                   if not d.startswith('.') and not _is_excluded(os.path.join(root, d), nr, pr)]
+        for f in fs:
+            p = os.path.normpath(os.path.join(root, f))
+            if _is_excluded(p, nr, pr):
+                continue
+            try:
+                if not stat.S_ISREG(os.stat(p).st_mode):
+                    continue
+            except OSError:
+                continue
+            files.append(os.path.relpath(p, directory))
+            if len(files) > cap:
+                return None
+    return sorted(files)
+
+
+def _pick_tree(directory):
+    """Flattened, indented checkbox of the directory: tick individual files, or a whole folder (its subtree)."""
+    files = _enumerate_scannable(directory)
+    if files is None:
+        print("Too many files to list as a tree -> use the glob or manual-path option instead.")
+        return None
+    if not files:
+        print("No scannable files found under there.")
+        return None
+    from collections import defaultdict
+    by_dir = defaultdict(list)
+    for rel in files:
+        by_dir[os.path.dirname(rel)].append(rel)
+    choices = []
+    for d in sorted(by_dir):
+        if d not in ("", "."):
+            depth = d.count(os.sep) + 1
+            choices.append(questionary.Choice(
+                f"{'  ' * (depth - 1)}[dir] {os.path.basename(d) or d}/  (all {len(by_dir[d])})",
+                value=("dir", d)))
+        else:
+            depth = 0
+        for rel in sorted(by_dir[d]):
+            choices.append(questionary.Choice(f"{'  ' * depth}- {os.path.basename(rel)}", value=("file", rel)))
+    picked = questionary.checkbox("Tick files to scan (or a whole folder):", choices=choices, style=_qstyle).ask()
+    if not picked:
+        return None
+    sel = set()
+    for kind, v in picked:
+        if kind == "file":
+            sel.add(v)
+        else:  # a folder -> everything in its subtree
+            sel.update(rel for rel in files if rel == v or rel.startswith(v + os.sep))
+    return [os.path.normpath(os.path.join(directory, rel)) for rel in sorted(sel)]
+
+
+def _pick_glob(directory):
+    """Match files by one or more glob patterns (relative to the dir) -> preview then confirm."""
+    import pathlib
+    base = pathlib.Path(directory)
+    patterns = []
+    while True:
+        pat = questionary.text("Glob pattern (e.g. **/*.env or src/*/config.py; blank when done):",
+                               style=_qstyle).ask()
+        if pat is None:
+            return None
+        pat = pat.strip()
+        if not pat:
+            break
+        patterns.append(pat)
+    if not patterns:
+        return None
+    matched = set()
+    for pat in patterns:
+        try:
+            for p in base.glob(pat):
+                if p.is_file():  # follows symlinks; True only for regular files -> skips sockets/FIFOs/dirs
+                    matched.add(os.path.normpath(str(p)))
+        except (ValueError, OSError):
+            print(f"  [yellow]bad pattern skipped: {pat}[/]")
+    matched = sorted(matched)
+    if not matched:
+        print("No files matched.")
+        return None
+    print(f"[cyan]{len(matched)} file(s) matched:[/]")
+    for m in matched[:50]:
+        print(f"  {os.path.relpath(m, directory)}")
+    if len(matched) > 50:
+        print(f"  ... and {len(matched) - 50} more")
+    ok = questionary.confirm(f"Scan these {len(matched)} file(s)?", default=True).ask()
+    return matched if ok else None
+
+
+def _pick_paths(directory):
+    """Enter explicit file paths, one per line (relative to the dir or absolute)."""
+    print("Enter file paths one per line (relative to the dir or absolute). Blank line when done.")
+    paths = []
+    while True:
+        line = questionary.text("path:", style=_qstyle).ask()
+        if line is None:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        p = line if os.path.isabs(line) else os.path.join(directory, line)
+        p = os.path.normpath(p)
+        if os.path.isfile(p):
+            paths.append(p)
+        else:
+            print(f"  [yellow]skipped (not a file): {line}[/]")
+    return paths or None
+
+
+def ask_scan_scope(directory):
+    """
+    Pick WHAT to scan inside 'directory'. Returns one of:
+        ('all',)              -> the whole directory (a normal project scan)
+        ('files', [abspaths]) -> a hand-picked set of files (targeted secret + inventory scan)
+        None                  -> cancelled / nothing picked
+    """
+    choice = _menu(
+        f"What in {directory} do you want to scan?",
+        choices=[
+            questionary.Choice("Everything in this directory (normal scan)", value="all"),
+            questionary.Choice("Pick files / folders (tree)", value="tree"),
+            questionary.Choice("Match files by glob pattern", value="glob"),
+            questionary.Choice("Enter file paths manually", value="paths"),
+            questionary.Choice("Back (cancel)", value="__back__"),
+        ],
+    )
+    if choice in (None, "__back__"):
+        return None
+    if choice == "all":
+        return ("all",)
+    files = {"tree": _pick_tree, "glob": _pick_glob, "paths": _pick_paths}[choice](directory)
+    return ("files", files) if files else None
+
+
+def do_file_scan(directory, files):
+    """
+    Targeted scan over a hand-picked set of files -> MnemoScan secrets + a size inventory. On-demand and
+    DISPLAY-ONLY: a loose file set isn't a project, so nothing is written to the database.
+    """
+    from security import _scan_file, BINARY_EXTS, MAX_FILE_BYTES
+    findings, total_bytes, scanned = [], 0, 0
+    for p in files:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        total_bytes += st.st_size
+        scanned += 1
+        if os.path.splitext(p)[1].lower() in BINARY_EXTS or st.st_size > MAX_FILE_BYTES:
+            continue  # sized in the inventory, but not read for secrets
+        findings.extend(_scan_file(p))
+    print(Panel(f"Scanned [bold]{scanned}[/] file(s) - [bold]{_human_size(total_bytes)}[/] total.\n"
+                "[dim]Targeted file scan: secrets + inventory only, nothing saved to the database.[/]",
+                title="Targeted file scan", style="green"))
+    if not findings:
+        print("No hard-coded secrets found in the selected files. ✓")
+        return
+    table = Table(title="Secrets found", box=box.ROUNDED, header_style="bold cyan")
+    for col in ("severity", "rule", "location", "detail"):
+        table.add_column(col, overflow="fold")
+    for f in findings:
+        loc = f"{os.path.relpath(f['path'], directory)}:{f['line']}"
+        table.add_row(str(f["severity"]), str(f["rule"]), loc, str(f["detail"]))
+    print(table)
