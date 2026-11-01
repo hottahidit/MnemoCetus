@@ -8,6 +8,8 @@
 #   /storage   -> storage analysis (largest projects / files / directories + workspace rollup).
 #   /security  -> MnemoScan findings: hard-coded secrets (masked), optional dependency vulnerabilities, .env / ignore hygiene.
 #   /git       -> git workspace: at-risk projects (uncommitted / unpushed / stale) + repos worth a `git gc`.
+#   /changes   -> what changed in this scan since the baseline (the long-term DB): new / removed / changed
+#                 projects, NEW security findings, new reclaimable bloat. Needs a baseline (see create_app).
 #
 # SECURITY: this is a local, single-user tool, but a browser will still talk to it on behalf of ANY website.
 # So every request must carry a local Host header (blocks DNS rebinding -> a remote page reading /export),
@@ -176,10 +178,28 @@ def _safe_next(target):
     return target
 
 
-def create_app(db_path=None):
-    """Flask app factory -> keeps things testable and lets us point at any .db file."""
+def _changes(db_path, baseline_db):
+    """The scan diff vs the baseline, or a reason string when there's nothing to compare against."""
+    if not os.path.exists(db_path):
+        return None, "No database yet -> run a scan first."
+    if not baseline_db or not os.path.exists(baseline_db):
+        return None, "No saved (long-term) database to compare against yet -> save a scan first."
+    if os.path.abspath(baseline_db) == os.path.abspath(db_path):
+        return None, ("You're viewing the saved database itself. Changes compare a fresh scan against it -> "
+                      "scan a directory from the CLI to see what changed.")
+    with utils.open_db(db_path) as cur, utils.open_db(baseline_db) as base:
+        return insight.diff_databases(cur, base), None
+
+
+def create_app(db_path=None, baseline_db=None):
+    """
+    Flask app factory -> keeps things testable and lets us point at any .db file.
+    'baseline_db' (optional) is what /changes and the export's "changes" section compare against -> the
+    CLI passes the long-term DB while the dashboard shows its temporary session scan.
+    """
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path or db_manager.DEFAULT_DB_PATH
+    app.config["BASELINE_DB"] = baseline_db
     app.jinja_env.filters["humansize"] = utils.human_size
     app.jinja_env.filters["gitbadge"] = gitinfo.badge_from_row
 
@@ -280,6 +300,17 @@ def create_app(db_path=None):
             summary=_security(current_db()),
         )
 
+    @app.route("/changes")
+    def changes_view():
+        diff, reason = _changes(current_db(), app.config["BASELINE_DB"])
+        return render_template(
+            "changes.html",
+            db_path=os.path.normpath(current_db()),
+            baseline=app.config["BASELINE_DB"],
+            diff=diff, reason=reason,
+            summary=insight.summarise_diff(diff) if diff else None,
+        )
+
     @app.route("/git")
     def git_view():
         return render_template(
@@ -296,7 +327,7 @@ def create_app(db_path=None):
         if not os.path.exists(path):
             # Nothing scanned yet -> send them back to the dashboard rather than an empty file.
             return redirect(url_for("index"))
-        body = report.render(report.build_report(path), fmt)
+        body = report.render(report.build_report(path, baseline_db=app.config["BASELINE_DB"]), fmt)
         mimetype = "application/json" if fmt == "json" else "text/markdown"
         return Response(
             body,

@@ -29,7 +29,7 @@ class TestDiff(unittest.TestCase):
 
     def _db(self, name):
         db = db_manager.Database(os.path.join(self.tmp, name))
-        db.start_scan(self.tmp)
+        db.start_scan("/w")  # the scan root the projects below actually live under (diffs are root-scoped)
         return db
 
     def test_new_removed_changed_grown(self):
