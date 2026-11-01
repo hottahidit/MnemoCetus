@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS projects (
     git_dirty        INTEGER DEFAULT 0,         -- 1 = uncommitted changes or untracked files present
     git_ahead        INTEGER DEFAULT 0,         -- commits ahead of upstream (unpushed)
     git_last_commit  INTEGER,                   -- unix timestamp of the last commit (NULL if unknown)
-    content_mtime    REAL,                      -- newest file mtime seen at scan time -> change detection for non-repos
+    content_mtime    REAL,                      -- newest mtime (files, hidden files, dirs) seen at scan time -> change detection
+    -- schema v8
+    git_root         TEXT,                      -- the repo's top-level dir (several projects can share one repo)
+    security_scanned INTEGER DEFAULT 0,         -- 1 = the secret scan ran for this row (else its findings mean nothing)
     -- bookkeeping
     first_seen       TEXT,                      -- when we first indexed this project
     updated_at       TEXT,                      -- last time this row changed

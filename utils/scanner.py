@@ -5,7 +5,7 @@
 # The recognition engine now lives in classifier.py and the cleanup detection in cleaner.py -> this file is the scanning core plus the Scanner orchestrator.
 
 # IMPORTS
-from rich import print
+from utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
 import os
 import stat
 
@@ -185,6 +185,17 @@ class Scanner:
         # inventory, and change-detection reuse them instead of re-stat-ing the whole tree.
         self._sizes = {}
         self._mtimes = {}
+        # mtimes of things that AREN'T inventory files but still matter for change detection: every walked
+        # directory (its mtime moves when an entry is added / removed / renamed -> catches deletions) and
+        # hidden files like .env (skipped by the inventory, but read by the secret scan).
+        self._extra_mtimes = {}
+
+    def _note_extra_mtime(self, path):
+        """Record a non-inventory mtime (a directory or a hidden file) for change detection; best effort."""
+        try:
+            self._extra_mtimes[os.path.normpath(path)] = os.stat(path).st_mtime
+        except OSError:
+            pass
 
     def scan(self, directory, confirm_filters=True):
         """
@@ -203,6 +214,7 @@ class Scanner:
         file_paths = []
         self._sizes = {}   # reset per scan; each file's size + mtime is captured once, below
         self._mtimes = {}
+        self._extra_mtimes = {}
 
         # Check if the directory exists and is accessible (error handling)
         if directory is None or not os.path.exists(directory):
@@ -222,9 +234,11 @@ class Scanner:
             for root, dirs, files in os.walk(directory):
                 # Prune excluded/hidden dirs in place so os.walk never even descends into them.
                 dirs[:] = [d for d in dirs if not d.startswith('.') and not _is_excluded(os.path.join(root, d), name_rules, path_rules)]
+                self._note_extra_mtime(root)
                 for file in files:
 
-                    if file.startswith('.'):  # Skip hidden files
+                    if file.startswith('.'):  # Skip hidden files (but note their mtime -> .env edits must
+                        self._note_extra_mtime(os.path.join(root, file))  # invalidate an incremental reuse)
                         continue
 
                     file_path = os.path.normpath(os.path.join(root, file))
@@ -245,6 +259,7 @@ class Scanner:
                     bytes_scanned += st.st_size
         else:
             for root, dirs, files in os.walk(directory):
+                self._note_extra_mtime(root)
                 for file in files:
                     file_path = os.path.normpath(os.path.join(root, file))
                     try:
@@ -586,7 +601,9 @@ def _load_baseline(baseline_db):
             if sig is None:
                 continue
             out[p["path"]] = {"sig": sig, "marks": db.get_marks(p["id"]),
-                              "findings": db.get_security_findings(p["id"])}
+                              "findings": db.get_security_findings(p["id"]),
+                              # did the secret scan actually run for this row? (else [] means "not checked")
+                              "security": bool(p.get("security_scanned"))}
     finally:
         db.close()
     return out
@@ -629,32 +646,54 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     files = sc.scan(directory, confirm_filters=confirm_filters)
     rels = sc.resolve_relationships(files, mode)
     sizes, mtimes = sc._sizes, sc._mtimes  # captured during the walk above -> reused, never re-stat-ed
-    baseline = _load_baseline(baseline_db)  # {path: {sig, marks, findings}} for incremental skipping ({} if none)
+    extra_mtimes = sc._extra_mtimes          # dirs + hidden files (change detection only, not inventory)
+    baseline = _load_baseline(baseline_db)  # {path: {sig, marks, findings, security}} for incremental skipping
+
+    # Nested projects: each project OWNS its subtree minus any child project's subtree. Without this a
+    # parent re-counts every child's files, bloat and secrets (double totals, duplicate rm suggestions).
+    project_paths = sorted(os.path.normpath(p) for p in rels)
+    children_of = {p: [q for q in project_paths if q.startswith(p + os.sep)] for p in project_paths}
+
+    def _owned(path, base, children):
+        return (path == base or path.startswith(base + os.sep)) and not any(
+            path == c or path.startswith(c + os.sep) for c in children)
 
     def _prepare(item):
         """Read-only, independent per-project work -> safe to run in parallel."""
         project, info = item
+        base = os.path.normpath(project)
+        children = children_of.get(base, [])
         record = _project_record(project, info)
         inventory = _collect_files(project, sc._name_rules, sc._path_rules, files, sizes)  # file list
+        if children:
+            inventory = [(p, sz) for p, sz in inventory if _owned(p, base, children)]
         # Git + content signals -> feed change detection, the diff, the at-risk flags, and the v1.0 light.
         gi = gitinfo.status(project)
-        content_mtime = max((mtimes.get(p, 0.0) for p, _ in inventory), default=0.0) or None
+        # Newest mtime across the project's own files, hidden files (.env) and directories (adds/deletes).
+        own_extra = (m for p, m in extra_mtimes.items() if _owned(p, base, children))
+        content_mtime = max(max((mtimes.get(p, 0.0) for p, _ in inventory), default=0.0),
+                            max(own_extra, default=0.0)) or None
         record["git_branch"] = gi.get("branch")
         record["git_head"] = gi.get("head")
         record["git_dirty"] = gi.get("dirty", False)
         record["git_ahead"] = gi.get("ahead", 0)
         record["git_last_commit"] = gi.get("last_commit_ts")
         record["content_mtime"] = content_mtime
+        record["git_root"] = gi.get("root")
+        record["security_scanned"] = bool(security)
         # Incremental: if this project is provably unchanged since the baseline, reuse its stored marks +
         # findings and skip the two heavy passes (the bloat walk and reading every file for secrets).
         sig = gitinfo.change_signature(gi.get("head"), gi.get("dirty"), content_mtime)
         prior = baseline.get(project)
-        if prior is not None and sig is not None and sig == prior["sig"]:
+        # Reuse only when provably unchanged AND the baseline actually ran the secret scan (if we need it):
+        # a baseline scanned with secrets OFF has findings=[] that mean "not checked", not "clean".
+        if (prior is not None and sig is not None and sig == prior["sig"]
+                and (prior["security"] or not security)):
             marks, reused = prior["marks"], True
             findings = prior["findings"] if security else []
         else:
-            marks = _collect_marks(project, sc._name_rules, sc._path_rules)  # size regenerable bloat
-            findings = scan_secrets(project, sc._name_rules, sc._path_rules) if security else []
+            marks = _collect_marks(project, sc._name_rules, sc._path_rules, skip=children)  # size regenerable bloat
+            findings = scan_secrets(project, sc._name_rules, sc._path_rules, skip=children) if security else []
             if security and gi.get("is_repo"):
                 findings += check_env_exposure(project, True)          # + exposed-.env hygiene (git-specific)
                 findings += check_ignore_hygiene(project, True, marks)  # + un-ignored regenerable bloat
@@ -679,7 +718,8 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
             progress(0, total)
         # Parallel read (threads) -> serial write (this thread). ex.map preserves input order.
         skipped = 0  # projects reused from the baseline (unchanged) rather than re-analysed
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        ex = ThreadPoolExecutor(max_workers=workers)
+        try:
             for record, marks, inventory, findings, reused in ex.map(_prepare, items):
                 if reused:
                     skipped += 1
@@ -691,11 +731,17 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
                 db.save_files(pid, inventory)                   # per-project inventory (storage analyser)
                 if security:
                     db.save_security_findings(pid, findings)    # MnemoScan (values already masked)
-                total_files += record["metrics"]["file_count"]
-                total_bytes += record["metrics"]["size_bytes"]
+                total_files += len(inventory)                   # OWN files only -> nested projects
+                total_bytes += sum(sz for _, sz in inventory)   # aren't counted twice in the scan totals
                 done += 1
                 if progress:
                     progress(done, total)
+        except BaseException:
+            # Ctrl-C (or any failure) -> drop the queued projects instead of letting the pool grind through
+            # every remaining one before the interrupt surfaces.
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
+        ex.shutdown()
         db.finish_scan(scan_id, project_count=total, file_count=total_files, total_bytes=total_bytes)
         return scan_id, total
     finally:

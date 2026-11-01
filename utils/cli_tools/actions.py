@@ -8,9 +8,11 @@ import os
 import stat
 
 import questionary
-from rich import print, box
+from rich import box
+from utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
 from rich.panel import Panel
 from rich.table import Table
+from rich.markup import escape
 
 from db_tools import manager as db_manager
 import report
@@ -331,6 +333,8 @@ def do_review(db_path, suggestions=None):
         print("Nothing to review yet -> scan a directory first.")
         return
     raw = questionary.text("Confidence threshold (default 0.6):", default="0.6").ask()
+    if raw is None:  # Ctrl-C -> back out
+        return
     try:
         threshold = float(raw)
     except (TypeError, ValueError):
@@ -357,11 +361,12 @@ def do_review(db_path, suggestions=None):
             )
             if sug:
                 conf = f"{sug['confidence']:.2f}" if sug.get("confidence") is not None else "?"
-                body += (f"\n[bold cyan]AI arbiter:[/] {sug.get('language') or '?'} / "
-                         f"{sug.get('category') or '?'}  (confidence {conf})")
+                # LLM output is untrusted -> escape it so it can't inject (or break) rich markup.
+                body += (f"\n[bold cyan]AI arbiter:[/] {escape(str(sug.get('language') or '?'))} / "
+                         f"{escape(str(sug.get('category') or '?'))}  (confidence {conf})")
                 if sug.get("rationale"):
-                    body += f"\n[dim]{sug['rationale']}[/]"
-            print(Panel(body, title=p["path"], style="yellow"))
+                    body += f"\n[dim]{escape(str(sug['rationale']))}[/]"
+            print(Panel(body, title=escape(p["path"]), style="yellow"))
             choices = (["Accept AI suggestion"] if sug else []) + [
                 "Accept this guess",
                 "Set the real type",
@@ -393,9 +398,15 @@ def do_review(db_path, suggestions=None):
                     choices=["backend", "frontend", "full stack", "automation", "library",
                              "cli", "desktop", "application", "data/ml", "other"],
                 )
-                language = questionary.text("Language (blank = keep auto):").ask() or None
-                note = questionary.text("Note (optional, e.g. 'frontend still to build'):").ask() or None
-                db.set_override(p["path"], language=language, category=category, note=note)
+                if category is None:  # Ctrl-C -> leave this project untouched (NOT locked as confirmed)
+                    continue
+                language = questionary.text("Language (blank = keep auto):").ask()
+                if language is None:
+                    continue
+                note = questionary.text("Note (optional, e.g. 'frontend still to build'):").ask()
+                if note is None:
+                    continue
+                db.set_override(p["path"], language=language or None, category=category, note=note or None)
         print("Review complete.")
     finally:
         db.close()
@@ -425,9 +436,17 @@ def do_history_scan():
     if not gitinfo.status(directory).get("is_repo"):
         print("Not a git repository -> the history scan needs one (the plain scan already covers the files).")
         return
-    from security import scan_git_history  # lazy: shells out to git, walks every commit
+    from security import scan_git_history, HistoryScanError  # lazy: shells out to git, walks every commit
     print("[dim]Walking every commit in history -> this can take a moment on a large repo...[/]")
-    findings = scan_git_history(directory)
+    try:
+        findings = scan_git_history(directory)
+    except HistoryScanError as e:
+        # Never fall through to "no secrets" -> an incomplete walk proves nothing.
+        print(Panel(f"[red]The history scan did not finish:[/] {escape(str(e))}\n"
+                    "[dim]Result unknown -> this is NOT a clean bill of health. Try again, or run a dedicated\n"
+                    "tool (gitleaks / trufflehog) on very large repositories.[/]",
+                    title="Git history scan incomplete", style="red"))
+        return
     if not findings:
         print("No secrets found anywhere in this repo's history. ✓")
         return

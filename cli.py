@@ -16,7 +16,7 @@ faulthandler.enable()
 # The engine modules live in utils/; put that on the import path before importing them (mirrors web/app.py).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils"))
 
-from rich import print
+from utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.markup import escape
@@ -25,6 +25,17 @@ from scanner import persist_scan, _human_size
 
 from cli_tools.ui import _qstyle, _menu, ask_dir, ask_mode, _pause
 from cli_tools.actions import do_browse, do_review, do_audit, do_history_scan, ask_scan_scope, do_file_scan
+
+
+class _Cancelled(Exception):
+    """A prompt was cancelled (questionary returns None on Ctrl-C) -> abort the whole multi-step flow."""
+
+
+def _answered(answer):
+    """Pass a prompt's answer through, or raise _Cancelled if the user hit Ctrl-C (answer is None)."""
+    if answer is None:
+        raise _Cancelled
+    return answer
 
 
 def _cli():
@@ -82,25 +93,42 @@ def _cli():
 
     # --- AI arbiter (opt-in; nothing here runs unless the user enabled it) ---- #
     def _configure_arbiter(cfg):
-        """Interactive setup for the AI arbiter block -> shared by the first-run wizard and Settings."""
-        ac = cfg["arbiter"]
+        """
+        Interactive setup for the AI arbiter block -> shared by the first-run wizard and Settings.
+
+        Edits a COPY and only commits + saves it when every prompt was answered, so a Ctrl-C part-way
+        leaves the existing settings exactly as they were. Returns True if the setup was completed.
+        """
+        try:
+            ac = _arbiter_prompts(dict(cfg["arbiter"]))
+        except _Cancelled:
+            print("[dim]Arbiter setup cancelled -> settings unchanged.[/]")
+            return False
+        cfg["arbiter"] = ac
+        settings.save(cfg)
+        if not ac["enabled"]:
+            print("AI arbiter is off.")
+            return True
+        test = questionary.confirm("Test the connection now?", default=True, style=_qstyle).ask()
+        if test:
+            ok, msg = arbiter.get_provider(ac).ping()
+            print(Panel(f"{'✅' if ok else '❌'} {escape(str(msg))}", title="Arbiter connection",
+                        style="green" if ok else "red"))
+        return True
+
+    def _arbiter_prompts(ac):
+        """The arbiter questions themselves -> fills and returns 'ac'; raises _Cancelled on any Ctrl-C."""
         enabled = questionary.confirm(
             "Enable the AI arbiter? An optional second opinion on low-confidence projects (off by default).",
             default=ac["enabled"], style=_qstyle).ask()
-        if enabled is None:
-            return
-        ac["enabled"] = enabled
+        ac["enabled"] = _answered(enabled)
         if not enabled:
-            settings.save(cfg)
-            print("AI arbiter is off.")
-            return
-        provider = _menu("AI provider:", choices=list(arbiter.PRESETS.keys()) + ["custom"])
-        if provider is None:
-            return
+            return ac
+        provider = _answered(_menu("AI provider:", choices=list(arbiter.PRESETS.keys()) + ["custom"]))
         ac["provider"] = provider
         preset = arbiter.PRESETS.get(provider, {})
         default_base = ac["base_url"] if provider == "custom" else preset.get("base_url", ac["base_url"])
-        ac["base_url"] = questionary.text("Base URL:", default=default_base, style=_qstyle).ask() or default_base
+        ac["base_url"] = _answered(questionary.text("Base URL:", default=default_base, style=_qstyle).ask()) or default_base
         local = arbiter.is_local(ac["base_url"])
         # Model: for OpenAI-compatible endpoints try to list what's available; otherwise ask by name.
         models = None
@@ -108,15 +136,15 @@ def _cli():
             key = os.environ.get(preset.get("api_key_env", "")) if preset.get("api_key_env") else None
             models = arbiter.list_models(ac["base_url"], key)
         if models:
-            pick = _menu("Model:", choices=models + ["(enter manually)"])
-            if pick in (None, "(enter manually)"):
-                ac["model"] = questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
-                                               style=_qstyle).ask() or ac["model"]
+            pick = _answered(_menu("Model:", choices=models + ["(enter manually)"]))
+            if pick == "(enter manually)":
+                ac["model"] = _answered(questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                                         style=_qstyle).ask()) or ac["model"]
             else:
                 ac["model"] = pick
         else:
-            ac["model"] = questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
-                                           style=_qstyle).ask() or ac["model"]
+            ac["model"] = _answered(questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                                     style=_qstyle).ask()) or ac["model"]
         if local:
             ac["api_key_env"] = ""
         else:
@@ -125,25 +153,25 @@ def _cli():
                 "never absolute paths. Dependency, marker and language signals are still sent.",
                 title="Privacy", style="yellow"))
             default_env = ac["api_key_env"] or preset.get("api_key_env", "")
-            ac["api_key_env"] = questionary.text(
-                "Name of the env var holding the API key:", default=default_env, style=_qstyle).ask() or default_env
-        ac["run_after_scan"] = bool(questionary.confirm(
+            ac["api_key_env"] = _answered(questionary.text(
+                "Name of the env var holding the API key:", default=default_env, style=_qstyle).ask()) or default_env
+        ac["run_after_scan"] = bool(_answered(questionary.confirm(
             "Run the arbiter automatically after a scan (on low-confidence projects, before you review them)?",
-            default=ac["run_after_scan"], style=_qstyle).ask())
-        settings.save(cfg)
-        if questionary.confirm("Test the connection now?", default=True, style=_qstyle).ask():
-            ok, msg = arbiter.get_provider(ac).ping()
-            print(Panel(f"{'✅' if ok else '❌'} {msg}", title="Arbiter connection",
-                        style="green" if ok else "red"))
+            default=ac["run_after_scan"], style=_qstyle).ask()))
+        return ac
 
     def _setup_wizard(cfg):
         """One-time first-run setup (web dashboard + AI arbiter). Records 'configured' so it never repeats."""
         print(Panel(
             "Welcome to MnemoCetus 🐳\nA quick one-time setup -> you can change any of this later in Settings.",
             title="First-run setup", style="cyan"))
-        cfg["web_enabled"] = bool(questionary.confirm(
-            "Auto-start the web dashboard alongside the CLI?", default=cfg["web_enabled"], style=_qstyle).ask())
-        _configure_arbiter(cfg)
+        web = questionary.confirm(
+            "Auto-start the web dashboard alongside the CLI?", default=cfg["web_enabled"], style=_qstyle).ask()
+        if web is None or not _configure_arbiter(cfg):
+            # Cancelled -> don't record 'configured', so the wizard offers itself again next launch.
+            print("[dim]Setup skipped -> it will run again next time (or use Settings).[/]\n")
+            return
+        cfg["web_enabled"] = web
         cfg["configured"] = True
         settings.save(cfg)
         print("[green]Setup complete.[/]\n")
@@ -171,11 +199,14 @@ def _cli():
             return {}
         from rich.console import Console
         suggestions = {}
-        with Console().status("[cyan]Consulting the arbiter...[/]", spinner="dots"):
-            for p in pending:
-                s = arbiter.classify_project(p, ac, workspace_root=session["root"])
-                if s:
-                    suggestions[p["path"]] = s
+        try:
+            with Console().status("[cyan]Consulting the arbiter... (Ctrl-C to stop early)[/]", spinner="dots"):
+                for p in pending:
+                    s = arbiter.classify_project(p, ac, workspace_root=session["root"])
+                    if s:
+                        suggestions[p["path"]] = s
+        except KeyboardInterrupt:
+            print("[yellow]Stopped early -> keeping the suggestions received so far.[/]")
         print(f"Arbiter offered {len(suggestions)} suggestion(s) across {len(pending)} project(s).")
         return suggestions
 
@@ -199,7 +230,11 @@ def _cli():
         if not mode or mode == "__back__":  # "Back" (or cancel) -> no scan, return to the menu
             return
         apply_filters = questionary.confirm("Apply exclude filters (skip node_modules, venv, ...)?", default=True).ask()
+        if apply_filters is None:  # Ctrl-C -> cancel; never fall through to an UNFILTERED scan
+            return
         secrets = questionary.confirm("Scan for hard-coded secrets?", default=True).ask()
+        if secrets is None:
+            return
         # Fresh temporary store -> each scan replaces the last, so it's only held until the next scan.
         if os.path.exists(session["db"]):
             os.remove(session["db"])
@@ -500,72 +535,76 @@ def _cli():
 
     # Step 1 gates everything: you scan first, which auto-holds the result in temporary memory; only then do the analysis features open up (running against that scan until you save it long-term).
     while True:
-        _header()
-        if session["root"] is None:
+        # Ctrl-C anywhere inside an action (a long scan, the arbiter loop, a prompt questionary didn't
+        # catch) backs out to this menu instead of killing the whole app.
+        try:
+            _header()
+            if session["root"] is None:
+                action = _menu(
+                    "Start here:",
+                    choices=["Scan a directory", "Open a saved database", "Settings", "Quit"],
+                )
+                if action in (None, "Quit"):
+                    print("Bye! 🐳")
+                    return
+                if action == "Scan a directory":
+                    do_scan()
+                elif action == "Open a saved database":
+                    do_browse(permanent_db)
+                elif action == "Settings":
+                    do_settings()
+                continue
+
+            save_label = "Re-save this scan long-term" if session["saved"] else "Save this scan long-term"
             action = _menu(
-                "Start here:",
-                choices=["Scan a directory", "Open a saved database", "Settings", "Quit"],
+                "Pick an action:",
+                choices=[
+                    "Explore this scan (browse / search / analyse)",
+                    save_label,
+                    "Review low-confidence projects",
+                    "AI: re-classify uncertain projects",
+                    "Dependency vulnerability audit (optional)",
+                    "Git history secret scan (optional)",
+                    "Reclaimer (delete bloat / build a uni-venv)",
+                    "Scan a different directory",
+                    "Open a saved database",
+                    "Settings",
+                    "Quit",
+                ],
             )
             if action in (None, "Quit"):
                 print("Bye! 🐳")
                 return
-            if action == "Scan a directory":
+            if action.startswith("Explore"):
+                do_browse(session["db"])
+            elif action.endswith("long-term"):
+                do_save_longterm()
+                _pause()
+            elif action == "Review low-confidence projects":
+                do_review(session["db"])
+                _pause()
+            elif action.startswith("AI:"):
+                sug = _arbitrate(session["db"])
+                if sug:
+                    do_review(session["db"], sug)
+                _pause()
+            elif action == "Dependency vulnerability audit (optional)":
+                do_audit()
+                _pause()
+            elif action == "Git history secret scan (optional)":
+                do_history_scan()
+                _pause()
+            elif action.startswith("Reclaimer"):
+                do_reclaim()
+                _pause()
+            elif action == "Scan a different directory":
                 do_scan()
             elif action == "Open a saved database":
                 do_browse(permanent_db)
             elif action == "Settings":
                 do_settings()
-            continue
-
-        save_label = "Re-save this scan long-term" if session["saved"] else "Save this scan long-term"
-        action = _menu(
-            "Pick an action:",
-            choices=[
-                "Explore this scan (browse / search / analyse)",
-                save_label,
-                "Review low-confidence projects",
-                "AI: re-classify uncertain projects",
-                "Dependency vulnerability audit (optional)",
-                "Git history secret scan (optional)",
-                "Reclaimer (delete bloat / build a uni-venv)",
-                "Scan a different directory",
-                "Open a saved database",
-                "Settings",
-                "Quit",
-            ],
-        )
-        if action in (None, "Quit"):
-            print("Bye! 🐳")
-            return
-        if action.startswith("Explore"):
-            do_browse(session["db"])
-        elif action.endswith("long-term"):
-            do_save_longterm()
-            _pause()
-        elif action == "Review low-confidence projects":
-            do_review(session["db"])
-            _pause()
-        elif action.startswith("AI:"):
-            sug = _arbitrate(session["db"])
-            if sug:
-                do_review(session["db"], sug)
-            _pause()
-        elif action == "Dependency vulnerability audit (optional)":
-            do_audit()
-            _pause()
-        elif action == "Git history secret scan (optional)":
-            do_history_scan()
-            _pause()
-        elif action.startswith("Reclaimer"):
-            do_reclaim()
-            _pause()
-        elif action == "Scan a different directory":
-            do_scan()
-        elif action == "Open a saved database":
-            do_browse(permanent_db)
-        elif action == "Settings":
-            do_settings()
-
+        except KeyboardInterrupt:
+            print("\n[yellow]Interrupted -> back to the menu.[/]")
 
 #👇  Show this in raw format so "\" will print.                          Do you like the ASCII?
 BANNER = r"""

@@ -9,7 +9,7 @@ import sqlite3
 
 from db_tools.analytics import AnalyticsMixin
 
-SCHEMA_VERSION = 7  # NOTE: Remember to bump this value with every new update
+SCHEMA_VERSION = 8  # NOTE: Remember to bump this value with every new update
 # schema.sql sits next to this file inside db_tools/; the DB lives at the project root (two levels up from db_tools/).
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "mnemocetus.db")
@@ -74,7 +74,7 @@ class Database(AnalyticsMixin):
         """Create the tables if they're missing, then run any pending migrations."""
         version = self.con.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
-            # Fresh database -> lay down the whole schema and stamp it as v1.
+            # Fresh database -> lay down the whole schema and stamp it with the current SCHEMA_VERSION.
             with open(self.schema_path, "r", encoding="utf-8") as f:
                 self.con.executescript(f.read())
             self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -101,6 +101,8 @@ class Database(AnalyticsMixin):
             self._migrate_to_v6()  # v0.7 covering index on files(path, size_bytes) for the storage rollup
         if from_version < 7:
             self._migrate_to_v7()  # v0.9 per-project git-awareness columns + content_mtime
+        if from_version < 8:
+            self._migrate_to_v8()  # v0.9 git_root (one repo, many projects) + security_scanned (incremental safety)
         self.con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.con.commit()
 
@@ -190,6 +192,23 @@ class Database(AnalyticsMixin):
                            ("git_last_commit", "INTEGER"), ("content_mtime", "REAL")):
             if name not in existing:
                 self.con.execute(f"ALTER TABLE projects ADD COLUMN {name} {decl}")
+
+    def _migrate_to_v8(self):
+        """
+        Add git_root + security_scanned (idempotent; skips a partial DB with no projects table).
+          git_root         -> lets the git views group nested projects that share one repository.
+          security_scanned -> 1 when the secret scan ran for this row. Without it, a baseline scanned with
+                              secrets OFF looked identical to a clean one, and incremental reuse showed "clean".
+        Existing rows get security_scanned = 0, so their findings are re-scanned once rather than trusted.
+        """
+        tables = {r["name"] for r in self.con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "projects" not in tables:
+            return
+        existing = {r["name"] for r in self.con.execute("PRAGMA table_info(projects)")}
+        for name, decl in (("git_root", "TEXT"), ("security_scanned", "INTEGER DEFAULT 0")):
+            if name not in existing:
+                self.con.execute(f"ALTER TABLE projects ADD COLUMN {name} {decl}")
     # ------------------------------------------------------------------------ #
 
     # -- Scans --------------------------------------------------------------- #
@@ -263,10 +282,13 @@ class Database(AnalyticsMixin):
             "reclaimable_bytes": record.get("reclaimable_bytes", 0),
             "git_branch": record.get("git_branch"),
             "git_head": record.get("git_head"),
-            "git_dirty": 1 if record.get("git_dirty") else 0,
+            # NULL = unknown (git status failed / timed out) -> must never be stored as "clean" (0).
+            "git_dirty": None if record.get("git_dirty", False) is None else (1 if record.get("git_dirty") else 0),
             "git_ahead": record.get("git_ahead", 0) or 0,
             "git_last_commit": record.get("git_last_commit"),
             "content_mtime": record.get("content_mtime"),
+            "git_root": record.get("git_root"),
+            "security_scanned": 1 if record.get("security_scanned") else 0,
             "scan_id": scan_id,
             "now": now,
         }
@@ -277,12 +299,14 @@ class Database(AnalyticsMixin):
             INSERT INTO projects (
                 path, language, category, confidence, frameworks, markers, breakdown, file_count, size_bytes, dependency_count, parent_path, role, is_symlink, symlink_target, reclaimable_bytes,
                 git_branch, git_head, git_dirty, git_ahead, git_last_commit, content_mtime,
+                git_root, security_scanned,
                 first_seen, updated_at, last_scan_id
             ) VALUES (
                 :path, :language, :category, :confidence, :frameworks, :markers, :breakdown,
                 :file_count, :size_bytes, :dependency_count,
                 :parent_path, :role, :is_symlink, :symlink_target, :reclaimable_bytes,
                 :git_branch, :git_head, :git_dirty, :git_ahead, :git_last_commit, :content_mtime,
+                :git_root, :security_scanned,
                 :now, :now, :scan_id
             )
             ON CONFLICT(path) DO UPDATE SET
@@ -306,6 +330,8 @@ class Database(AnalyticsMixin):
                 git_ahead         = excluded.git_ahead,
                 git_last_commit   = excluded.git_last_commit,
                 content_mtime     = excluded.content_mtime,
+                git_root          = excluded.git_root,
+                security_scanned  = excluded.security_scanned,
                 updated_at        = excluded.updated_at,
                 last_scan_id      = excluded.last_scan_id
             """,
@@ -433,12 +459,24 @@ class Database(AnalyticsMixin):
                     "parent_path": row["parent_path"], "role": row["role"],
                     "is_symlink": bool(row["is_symlink"]), "symlink_target": row["symlink_target"],
                     "reclaimable_bytes": row["reclaimable_bytes"],
+                    # git + change-detection state -> without these the saved DB can never serve as an
+                    # incremental baseline, and its Git page / at-risk view come up empty.
+                    "git_branch": row["git_branch"], "git_head": row["git_head"],
+                    "git_dirty": None if row["git_dirty"] is None else bool(row["git_dirty"]),
+                    "git_ahead": row["git_ahead"], "git_last_commit": row["git_last_commit"],
+                    "content_mtime": row["content_mtime"], "git_root": row["git_root"],
+                    "security_scanned": bool(row["security_scanned"]),
                 })
                 deps = src.con.execute(
                     "SELECT name, ecosystem, version_spec FROM dependencies WHERE project_id = ?", (src_pid,)).fetchall()
-                self.save_dependencies(pid, [d["name"] for d in deps],
-                                       ecosystem=(deps[0]["ecosystem"] if deps else None),
-                                       specs={d["name"]: d["version_spec"] for d in deps})
+                # Keep each dependency's OWN ecosystem (a project can mix python + npm deps).
+                by_eco = {}
+                for d in deps:
+                    by_eco.setdefault(d["ecosystem"], []).append(d)
+                self.save_dependencies(pid, [], replace=True)  # clear, then add each ecosystem's group
+                for eco, group in by_eco.items():
+                    self.save_dependencies(pid, [d["name"] for d in group], ecosystem=eco,
+                                           specs={d["name"]: d["version_spec"] for d in group}, replace=False)
                 self.save_files(pid, [(f["path"], f["size_bytes"]) for f in src.con.execute(
                     "SELECT path, size_bytes FROM files WHERE project_id = ?", (src_pid,))])
                 self.save_marks(pid, [dict(m) for m in src.con.execute(
@@ -574,7 +612,8 @@ class Database(AnalyticsMixin):
         data["markers"] = _loads(data.get("markers"))
         data["breakdown"] = _loads_breakdown(data.get("breakdown"))
         data["is_symlink"] = bool(data.get("is_symlink"))
-        data["git_dirty"] = bool(data.get("git_dirty"))
+        # NULL stays None ("unknown": git status failed at scan time) -> never collapse it to clean.
+        data["git_dirty"] = None if data.get("git_dirty") is None else bool(data["git_dirty"])
         data["user_confirmed"] = bool(data.get("user_confirmed"))
         data["override_frameworks"] = _loads(data.get("override_frameworks"))
         data["dependencies"] = [d["name"] for d in self.get_dependencies(data["id"])]
@@ -615,22 +654,30 @@ class Database(AnalyticsMixin):
         ).fetchall()
         return [self._inflate_project(r) for r in rows]
 
-    def set_override(self, path, language=None, category=None, frameworks=None, note=None):
+    def set_override(self, path, language=None, category=None, frameworks=None, note=None, partial=False):
         """
         Record the user's call on what a project actually is, and lock it in (user_confirmed).
 
         Any field left None keeps the auto-detected value. Survives re-scans.
+        partial=True only CHANGES the fields that are given and keeps any earlier override for the rest
+        (the web row form posts just the field you edited -> it must not wipe e.g. an accepted AI
+        suggestion's frameworks + rationale note). The default replaces the whole override.
 
         Returns:
             bool: True if a project matched that path.
         """
         path = os.path.normpath(os.path.abspath(path))
-        cur = self.con.execute(
-            "UPDATE projects SET override_language = ?, override_category = ?, "
-            "override_frameworks = ?, override_note = ?, user_confirmed = 1, updated_at = ? "
-            "WHERE path = ?",
-            (language, category, _json_or_none(frameworks), note, _now(), path),
-        )
+        if partial:
+            sql = ("UPDATE projects SET override_language = COALESCE(?, override_language), "
+                   "override_category = COALESCE(?, override_category), "
+                   "override_frameworks = COALESCE(?, override_frameworks), "
+                   "override_note = COALESCE(?, override_note), user_confirmed = 1, updated_at = ? "
+                   "WHERE path = ?")
+        else:
+            sql = ("UPDATE projects SET override_language = ?, override_category = ?, "
+                   "override_frameworks = ?, override_note = ?, user_confirmed = 1, updated_at = ? "
+                   "WHERE path = ?")
+        cur = self.con.execute(sql, (language, category, _json_or_none(frameworks), note, _now(), path))
         self.con.commit()
         return cur.rowcount > 0
 

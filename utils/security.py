@@ -125,7 +125,7 @@ def _scan_file(path):
         pass
     return out
 
-def scan_secrets(directory, name_rules, path_rules):
+def scan_secrets(directory, name_rules, path_rules, skip=()):
     """
     Walk 'directory' and flag likely hard-coded secrets (API keys, tokens, private keys) in its text files.
 
@@ -136,14 +136,18 @@ def scan_secrets(directory, name_rules, path_rules):
         directory (str): the project dir to inspect.
         name_rules (set): compiled basename exclude rules.
         path_rules (set): compiled path exclude rules.
+        skip (iterable): directories NOT to descend into -> nested child projects, scanned (and reported)
+            on their own, so a parent doesn't duplicate every child's findings.
 
     Returns:
         list[dict]: one {kind, rule, severity, path, line, detail} per match (detail is the masked secret).
     """
+    skip = {os.path.normpath(p) for p in skip}
     findings = []
     for root, dirs, files in os.walk(directory):
         dirs[:] = [d for d in dirs
-                   if not d.startswith('.') and not _is_excluded(os.path.join(root, d), name_rules, path_rules)]
+                   if not d.startswith('.') and not _is_excluded(os.path.join(root, d), name_rules, path_rules)
+                   and not (skip and os.path.normpath(os.path.join(root, d)) in skip)]
         for f in files:
             path = os.path.normpath(os.path.join(root, f))
             if _is_excluded(path, name_rules, path_rules):
@@ -162,23 +166,37 @@ def scan_secrets(directory, name_rules, path_rules):
     return findings
 
 
+class HistoryScanError(RuntimeError):
+    """The history scan could not finish (git failed or timed out) -> the result is UNKNOWN, not clean."""
+
+
 def scan_git_history(directory, timeout=300):
     """
     Scan a repo's FULL git history for hard-coded secrets -> secrets that were committed and later
     "removed" still live in the history and are the real leak. On-demand (heavier than the working-tree
-    scan), read-only, and shells out to git -> returns [] when git is absent or it isn't a repo.
+    scan), read-only, and shells out to git.
 
-    Walks every blob reachable from all refs (`git rev-list --objects --all`), streams their contents in
-    one `git cat-file --batch`, and runs the same SECRET_RULES. Binary/oversized blobs are skipped and
-    findings are deduped by (rule, masked value, path), so a secret living across many commits is one
-    finding. Findings use kind 'secret-history'; detail carries the masked value + the in-history path.
+    Returns [] when git is absent or 'directory' isn't a repo (nothing to scan). Raises HistoryScanError
+    when git fails or the walk exceeds 'timeout' seconds -> the caller must NOT show that as "no secrets".
+
+    Walks every blob reachable from all refs (`git rev-list --objects --all`) and streams their contents
+    through one `git cat-file --batch`, one object at a time -> memory stays bounded by MAX_FILE_BYTES no
+    matter how big the repo is (oversized blobs are read past in chunks, never held). Binary/oversized
+    blobs are skipped and findings are deduped by (rule, masked value, path), so a secret living across
+    many commits is one finding. Findings use kind 'secret-history'; detail carries the masked value +
+    the in-history path.
     """
+    import time
+    import tempfile
     import gitinfo  # lazy -> keep the git layer off security.py's import path
     if not gitinfo.git_available():
         return []
-    listing = gitinfo._git(["rev-list", "--objects", "--all"], directory)
-    if not listing:
-        return []
+    if gitinfo._git(["rev-parse", "--git-dir"], directory) is None:
+        return []  # not a repository
+    deadline = time.monotonic() + timeout
+    listing = gitinfo._git(["rev-list", "--objects", "--all"], directory, timeout=timeout)
+    if listing is None:
+        raise HistoryScanError("`git rev-list --objects --all` failed or timed out")
     # rev-list --objects lines are "<sha>" (commits) or "<sha> <path>" (blobs + subtrees). Keep the ones
     # that carry a path (candidate files); cat-file --batch tells us which are actually blobs.
     sha_path, order = {}, []
@@ -189,35 +207,10 @@ def scan_git_history(directory, timeout=300):
             order.append(sha)
     if not order:
         return []
-    try:
-        proc = subprocess.run(gitinfo.git_command(["cat-file", "--batch"]), cwd=directory, env=gitinfo.git_env(),
-                              input="\n".join(order).encode(), capture_output=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    data, findings, seen = proc.stdout, [], set()
-    i, n = 0, len(proc.stdout)
-    while i < n:
-        nl = data.find(b"\n", i)
-        if nl == -1:
-            break
-        parts = data[i:nl].decode("utf-8", "ignore").split(" ")
-        i = nl + 1
-        if len(parts) == 2 and parts[1] == "missing":
-            continue  # object gone (shouldn't happen for rev-list output) -> no content follows
-        if len(parts) != 3:
-            break  # malformed stream -> stop rather than misalign
-        sha, otype, size_s = parts
-        try:
-            size = int(size_s)
-        except ValueError:
-            break
-        content = data[i:i + size]
-        i += size + 1  # skip the content and its trailing newline
-        if otype != "blob":
-            continue
-        path = sha_path.get(sha, "")
-        if os.path.splitext(path)[1].lower() in BINARY_EXTS or size > MAX_FILE_BYTES:
-            continue
+
+    findings, seen = [], set()
+
+    def _check(path, content):
         for lineno, line in enumerate(content.decode("utf-8", "ignore").splitlines(), 1):
             if len(line) > MAX_LINE_CHARS:
                 line = line[:MAX_LINE_CHARS]
@@ -234,6 +227,53 @@ def scan_git_history(directory, timeout=300):
                         "path": os.path.join(directory, path), "line": lineno,
                         "detail": f"{masked} (in git history: {path})",
                     })
+
+    # Feed the sha list from a temp FILE (not a pipe we also write to) -> no stdin/stdout deadlock while
+    # we stream the output.
+    with tempfile.TemporaryFile() as shas:
+        shas.write(("\n".join(order) + "\n").encode())
+        shas.seek(0)
+        try:
+            proc = subprocess.Popen(gitinfo.git_command(["cat-file", "--batch"]), cwd=directory,
+                                    stdin=shas, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    env=gitinfo.git_env())
+        except OSError as e:
+            raise HistoryScanError(f"could not run git cat-file: {e}") from e
+        out = proc.stdout
+        try:
+            for _ in order:
+                if time.monotonic() > deadline:
+                    raise HistoryScanError(f"timed out after {timeout}s")
+                header = out.readline()
+                if not header:
+                    raise HistoryScanError("git cat-file ended early")
+                parts = header.decode("utf-8", "ignore").split()
+                if len(parts) == 2 and parts[1] == "missing":
+                    continue  # object gone -> no content follows
+                if len(parts) != 3 or not parts[2].isdigit():
+                    raise HistoryScanError("malformed git cat-file output")
+                sha, otype, size = parts[0], parts[1], int(parts[2])
+                path = sha_path.get(sha, "")
+                wanted = (otype == "blob" and size <= MAX_FILE_BYTES
+                          and os.path.splitext(path)[1].lower() not in BINARY_EXTS)
+                if wanted:
+                    content = out.read(size)
+                else:
+                    remaining = size  # stream past it in chunks -> never hold a huge blob in memory
+                    while remaining:
+                        chunk = out.read(min(remaining, 1 << 20))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                    content = None
+                out.read(1)  # the newline after each object's content
+                if content is not None:
+                    _check(path, content)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            out.close()
     return findings
 
 
