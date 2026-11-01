@@ -123,7 +123,7 @@ class TestCleanupView(WebTestCase):
         resp = self.client().get("/cleanup")
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"Cleanup recommendations", resp.data)
-        self.assertIn(b"rm -rf /tmp/big/node_modules", resp.data)  # suggested command shown
+        self.assertIn(b"rm -rf -- /tmp/big/node_modules", resp.data)  # suggested command shown
 
     def test_cleanup_min_filter(self):
         self.seed_marks("/tmp/big", [

@@ -129,12 +129,13 @@ class TestAnthropic(unittest.TestCase):
 
 
 class TestGemini(unittest.TestCase):
-    def test_success_puts_key_in_query(self):
+    def test_success_puts_key_in_header_not_url(self):
         reply = {"candidates": [{"content": {"parts": [{"text": json.dumps(VALID)}]}}]}
         with mock.patch.object(arbiter, "_post_json", return_value=reply) as m:
             out = arbiter.GeminiProvider("https://generativelanguage.googleapis.com/v1beta", "gemini-1.5-flash", "k123").classify({"path": "x"})
         self.assertEqual(out["language"], "python")
-        self.assertIn("key=k123", m.call_args.args[0])
+        self.assertNotIn("k123", m.call_args.args[0])          # never in the URL (logs / proxies)
+        self.assertEqual(m.call_args.args[2], {"x-goog-api-key": "k123"})
 
 
 class TestGetProvider(unittest.TestCase):

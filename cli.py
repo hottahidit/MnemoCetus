@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "uti
 from rich import print
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.markup import escape
 
 from scanner import ( # type: ignore
     scan_directory, classify_directory, resolve_directory_relationships, #type: ignore
@@ -445,7 +446,7 @@ def _cli():
     def do_reclaim():
         # The one destructive flow: pick bloat to delete + optionally build a uni-venv, confirm, then execute.
         from db_tools import manager as db_manager
-        from reclaimer import execute_reclaim, create_uni_venv
+        from reclaimer import execute_reclaim, create_uni_venv, _safe_to_delete
         db = db_manager.Database(session["db"])
         try:
             recs = db.cleanup_recommendations()
@@ -502,14 +503,31 @@ def _cli():
                 print("Nothing selected -> Reclaimer cancelled.")
                 return
 
-            # 3) show the full plan and require a typed confirmation.
+            # 3) pre-flight the safety guard so refusals show in the plan, BEFORE the typed confirmation
+            #    (execute_reclaim re-checks every path again at delete time).
+            refused = []
+            if targets:
+                checked = [(it, _safe_to_delete(it["path"], session["root"])) for it in targets]
+                refused = [(it, why) for it, (ok, why) in checked if not ok]
+                targets = [it for it, (ok, _) in checked if ok]
+                if not targets and not uni:
+                    print(Panel("\n".join(f"[yellow]-[/] {escape(it['path'])}  [dim]{escape(why)}[/]" for it, why in refused),
+                                title="Every selected directory was refused by the safety guard", style="yellow"))
+                    return
+
+            # 4) show the full plan and require a typed confirmation.
             lines = []
             if targets:
                 total = sum(it["size_bytes"] for it in targets)
                 lines.append(f"[bold]Delete {len(targets)} director(y/ies)[/], freeing ~[bold]{_human_size(total)}[/]:")
-                lines += [f"  [red]-[/] {it['path']}  [dim]({_human_size(it['size_bytes'])})[/]" for it in targets[:20]]
+                lines += [f"  [red]-[/] {escape(it['path'])}  [dim]({_human_size(it['size_bytes'])})[/]" for it in targets[:20]]
                 if len(targets) > 20:
                     lines.append(f"  [dim]... and {len(targets) - 20} more[/]")
+            if refused:
+                lines.append(f"\n[yellow]Kept {len(refused)} director(y/ies)[/] the safety guard refused:")
+                lines += [f"  [yellow]-[/] {escape(it['path'])}  [dim]{escape(why)}[/]" for it, why in refused[:20]]
+                if len(refused) > 20:
+                    lines.append(f"  [dim]... and {len(refused) - 20} more[/]")
             if uni:
                 lines.append(f"\n[bold]Create uni-venv[/] at {uni['path']}")
                 lines.append(f"  covering {len(uni['projects'])} project(s), installing {len(uni['deps'])} package(s)")
@@ -519,12 +537,14 @@ def _cli():
                 print("Cancelled -> nothing was changed.")
                 return
 
-            # 4) execute.
+            # 5) execute.
             if targets:
                 r = execute_reclaim(targets, session["root"])
                 summary = f"Deleted [bold]{len(r['deleted'])}[/] dir(s), freed [bold]{_human_size(r['freed_bytes'])}[/]."
                 if r["skipped"]:
-                    summary += f"\n[yellow]Skipped {len(r['skipped'])}[/] (guarded / already gone)."
+                    summary += f"\n[yellow]Skipped {len(r['skipped'])}[/] (refused by the safety guard / already gone):"
+                    for p, why in r["skipped"]:
+                        summary += f"\n  [yellow]-[/] {escape(p)}  [dim]{escape(why)}[/]"
                 print(Panel(summary, title="Reclaimed", style="green"))
                 for p, msg in r["errors"]:
                     print(f"  [red]error[/] {p}: {msg}")
@@ -533,6 +553,9 @@ def _cli():
                 v = create_uni_venv(uni["path"], uni["deps"])
                 if not v["created"]:
                     print(Panel(f"[red]Could not create the venv:[/] {v['error']}", title="uni-venv failed", style="red"))
+                elif v["failed"] and v["installed"]:
+                    print(Panel(f"uni-venv ready at [bold]{v['path']}[/] with [bold]{v['installed']}[/] package(s).\n"
+                                f"[dim]{escape(v['error'] or '')}[/]", title="uni-venv created (some skipped)", style="yellow"))
                 elif v["failed"]:
                     print(Panel(f"venv created at [bold]{v['path']}[/], but the install didn't finish.\n[dim]{v['error']}[/]",
                                 title="uni-venv (deps not installed)", style="yellow"))

@@ -7,6 +7,7 @@
 
 import os
 import re
+import shlex
 
 
 _RANGE_TOKENS = ("^", "~", ">", "<", "*", "||", " - ")
@@ -129,7 +130,7 @@ class AnalyticsMixin:
                 "size_bytes": r["size_bytes"],
                 "file_count": r["file_count"],
                 "reason": r["reason"],
-                "command": f"rm -rf {r['path']}",  # suggestion only -> we never run this
+                "command": "rm -rf -- " + shlex.quote(r["path"]),  # suggestion only -> we never run this; quoted so a pasted path with spaces / metachars can't hit the wrong target
             })
         return {
             "total_savings": total,

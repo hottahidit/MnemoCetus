@@ -190,7 +190,7 @@ def scan_git_history(directory, timeout=300):
     if not order:
         return []
     try:
-        proc = subprocess.run(["git", "cat-file", "--batch"], cwd=directory,
+        proc = subprocess.run(gitinfo.git_command(["cat-file", "--batch"]), cwd=directory, env=gitinfo.git_env(),
                               input="\n".join(order).encode(), capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return []

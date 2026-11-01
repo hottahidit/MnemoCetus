@@ -544,7 +544,7 @@ class TestCleanupRecommendations(DBTestCase):
         first = recs["items"][0]
         self.assertEqual(first["name"], "node_modules")  # biggest first
         self.assertEqual(first["project_path"], "/tmp/a")
-        self.assertEqual(first["command"], "rm -rf /tmp/a/node_modules")
+        self.assertEqual(first["command"], "rm -rf -- /tmp/a/node_modules")
         self.assertEqual(first["reason"], "npm install")
         self.assertEqual(recs["by_kind"]["dependencies"]["bytes"], 5000)
 
