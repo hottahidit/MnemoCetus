@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %} - Changes{% endblock %}
+{% block content %}
+
+  <h2>What changed <span class="muted">since your last save</span></h2>
+  <p class="muted">This scan compared against the saved (long-term) database
+    {% if baseline %}<code>{{ baseline }}</code>{% endif %}. New security findings are the ones to act on first;
+    a project that's new to the database counts all of its findings as new.</p>
+
+  {% if reason %}
+    <p class="muted">{{ reason }}</p>
+  {% else %}
+    <p>Compared <code>{{ diff['root'] }}</code>: <strong>{{ summary }}</strong>.</p>
+
+    <div class="cards">
+      <div class="card"><div class="n">{{ diff['new_findings'] | length }}</div><div class="l">new findings</div></div>
+      <div class="card"><div class="n">{{ diff['resolved_findings'] | length }}</div><div class="l">resolved</div></div>
+      <div class="card"><div class="n">{{ diff['new'] | length }} / {{ diff['removed'] | length }}</div><div class="l">projects new / removed</div></div>
+      <div class="card"><div class="n">{{ diff['changed'] | length }}</div><div class="l">projects changed</div></div>
+      <div class="card"><div class="n">{% if diff['bloat_delta_bytes'] >= 0 %}+{% else %}-{% endif %}{{ diff['bloat_delta_bytes'] | abs | humansize }}</div><div class="l">reclaimable change</div></div>
+    </div>
+
+    {% if diff['unchecked'] %}
+      <p class="muted">Findings weren't compared for {{ diff['unchecked'] | length }} project(s): one of the two
+        scans ran without the secret scan, so "no change" can't be claimed for them.</p>
+    {% endif %}
+
+    <h3>New security findings <span class="muted">({{ diff['new_findings'] | length }})</span></h3>
+    {% if not diff['new_findings'] %}
+      <p class="muted">Nothing new since the last save.</p>
+    {% else %}
+      <table>
+        <tr><th>severity</th><th>kind</th><th>rule</th><th>location</th><th>detail</th></tr>
+        {% for f in diff['new_findings'] %}
+          <tr>
+            <td><span class="badge {{ f.severity }}">{{ f.severity }}</span></td>
+            <td><span class="tag">{{ f.kind }}</span></td>
+            <td>{{ f.rule }}</td>
+            <td class="muted"><code>{{ f.path }}{% if f.line %}:{{ f.line }}{% endif %}</code></td>
+            <td class="muted">{{ f.detail }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if diff['resolved_findings'] %}
+      <h3>Resolved <span class="muted">({{ diff['resolved_findings'] | length }})</span></h3>
+      <table>
+        <tr><th>severity</th><th>rule</th><th>location</th></tr>
+        {% for f in diff['resolved_findings'] %}
+          <tr><td><span class="badge low">{{ f.severity }}</span></td><td>{{ f.rule }}</td>
+              <td class="muted"><code>{{ f.path }}</code></td></tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if diff['new_bloat'] %}
+      <h3>New reclaimable bloat <span class="muted">({{ diff['new_bloat'] | length }})</span></h3>
+      <table>
+        <tr><th>directory</th><th>kind</th><th>size</th></tr>
+        {% for m in diff['new_bloat'] %}
+          <tr><td><code>{{ m.path }}</code></td><td><span class="tag">{{ m.kind }}</span></td>
+              <td>{{ m.size_bytes | humansize }}</td></tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% for key, title in [('new', 'New projects'), ('removed', 'Removed projects')] %}
+      {% if diff[key] %}
+        <h3>{{ title }} <span class="muted">({{ diff[key] | length }})</span></h3>
+        <table>
+          <tr><th>project</th><th>language</th><th>size</th></tr>
+          {% for x in diff[key] %}
+            <tr>
+              <td>{% if key == 'new' %}<a href="{{ url_for('project_view', path=x.path) }}"><code>{{ x.path }}</code></a>{% else %}<code>{{ x.path }}</code>{% endif %}</td>
+              <td>{{ x.language or '?' }}</td><td>{{ x.size_bytes | humansize }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endif %}
+    {% endfor %}
+
+    {% if diff['grown'] %}
+      <h3>Size changes <span class="muted">(biggest first)</span></h3>
+      <table>
+        <tr><th>project</th><th>change</th><th>now</th></tr>
+        {% for g in diff['grown'] %}
+          <tr>
+            <td><a href="{{ url_for('project_view', path=g.path) }}"><code>{{ g.path }}</code></a></td>
+            <td>{% if g.delta_bytes > 0 %}+{% else %}-{% endif %}{{ g.delta_bytes | abs | humansize }}</td>
+            <td class="muted">{{ g.size_bytes | humansize }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if diff['changed'] %}
+      <h3>Changed <span class="muted">(new commits / working-tree / content edits)</span></h3>
+      <table>
+        <tr><th>project</th><th>head</th><th>working tree</th></tr>
+        {% for c in diff['changed'] %}
+          <tr>
+            <td><a href="{{ url_for('project_view', path=c.path) }}"><code>{{ c.path }}</code></a></td>
+            <td class="muted">{% if c.was_head != c.now_head %}<code>{{ (c.was_head or '-')[:7] }}</code> &rarr; <code>{{ (c.now_head or '-')[:7] }}</code>{% else %}&mdash;{% endif %}</td>
+            <td>{% if not c.now_head and not c.was_head %}<span class="muted">files edited (not a git repo)</span>{% elif c.now_dirty is none %}<span class="badge high">unverified</span>{% elif c.now_dirty %}<span class="badge medium">uncommitted</span>{% else %}clean{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  {% endif %}
+
+{% endblock %}

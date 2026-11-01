@@ -22,7 +22,57 @@ from scanner import _human_size
 from cli_tools.ui import _menu, ask_dir, _pause, _qstyle
 
 
-def do_browse(db_path):
+def show_changes(changes):
+    """Render a full insight.diff_databases result -> new findings first, then bloat, then project changes."""
+    print(Panel(f"Compared [bold]{escape(str(changes['root']))}[/] against your saved database:\n"
+                f"{escape(insight.summarise_diff(changes))}.",
+                title="What changed since last save", style="red" if changes["new_findings"] else "cyan"))
+    if changes["new_findings"]:
+        t = Table(title=f"NEW security findings ({len(changes['new_findings'])})", box=box.ROUNDED,
+                  header_style="bold red")
+        for col in ("severity", "kind", "rule", "location", "detail"):
+            t.add_column(col, overflow="fold")
+        for f in changes["new_findings"]:
+            loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
+            t.add_row(escape(str(f["severity"])), escape(str(f["kind"])), escape(str(f["rule"])),
+                      escape(str(loc)), escape(str(f["detail"])))
+        print(t)
+    if changes["resolved_findings"]:
+        print(f"[green]{len(changes['resolved_findings'])} finding(s) resolved since the last save.[/]")
+    if changes["unchecked"]:
+        print(f"[yellow]Findings not compared for {len(changes['unchecked'])} project(s)[/] "
+              f"[dim](one of the two scans ran without the secret scan)[/]")
+    if changes["new_bloat"]:
+        t = Table(title=f"New reclaimable bloat ({len(changes['new_bloat'])})", box=box.ROUNDED,
+                  header_style="bold cyan")
+        for col in ("directory", "kind", "size"):
+            t.add_column(col, overflow="fold")
+        for m in changes["new_bloat"]:
+            t.add_row(escape(m["path"]), escape(str(m["kind"])), _human_size(m["size_bytes"] or 0))
+        print(t)
+    for key, title in (("new", "New projects"), ("removed", "Removed projects")):
+        if changes[key]:
+            t = Table(title=f"{title} ({len(changes[key])})", box=box.ROUNDED, header_style="bold cyan")
+            for col in ("project", "language", "size"):
+                t.add_column(col, overflow="fold")
+            for x in changes[key]:
+                t.add_row(escape(x["path"]), escape(str(x["language"] or "?")), _human_size(x["size_bytes"]))
+            print(t)
+    if changes["grown"]:
+        t = Table(title="Size changes (biggest first)", box=box.ROUNDED, header_style="bold cyan")
+        for col in ("project", "change", "now"):
+            t.add_column(col, overflow="fold")
+        for g in changes["grown"][:25]:
+            sign = "+" if g["delta_bytes"] > 0 else "-"
+            t.add_row(escape(g["path"]), sign + _human_size(abs(g["delta_bytes"])), _human_size(g["size_bytes"]))
+        print(t)
+    if changes["changed"]:
+        print(f"[dim]{len(changes['changed'])} project(s) have new commits, working-tree or content edits.[/]")
+
+
+def do_browse(db_path, baseline_db=None):
+    # baseline_db: the saved (long-term) DB to diff against when browsing a fresh session scan -> enables
+    # "What changed since last save" and the export's changes section. Ignored when it IS db_path.
 
     if not os.path.exists(db_path):
         print("Nothing to browse there yet -> scan a directory first (or pick a saved database).")
@@ -43,12 +93,15 @@ def do_browse(db_path):
             )
         print(table)
 
+    if baseline_db and (not os.path.exists(baseline_db)
+                        or os.path.abspath(baseline_db) == os.path.abspath(db_path)):
+        baseline_db = None  # nothing saved yet, or browsing the saved DB itself -> nothing to diff
     db = db_manager.Database(db_path)
     try:
         while True:
             action = _menu(
                 "Explore:",
-                choices=[
+                choices=(["What changed since last save"] if baseline_db else []) + [
                     "List all projects",
                     "Search (language / category / framework)",
                     "View a project (details + deps)",
@@ -69,7 +122,11 @@ def do_browse(db_path):
             if action in (None, "Back"):
                 return
 
-            if action == "List all projects":
+            if action == "What changed since last save":
+                with db_manager.Database(baseline_db) as base:
+                    show_changes(insight.diff_databases(db, base))
+
+            elif action == "List all projects":
                 show_projects(db.all_projects())
 
             elif action == "Search (language / category / framework)":
@@ -305,7 +362,7 @@ def do_browse(db_path):
                 out_path = questionary.path("Save to:", default=default_name, style=_qstyle).ask()
                 if not out_path:
                     continue
-                body = report.render(report.build_report(db_path), fmt)
+                body = report.render(report.build_report(db_path, baseline_db=baseline_db), fmt)
                 try:
                     with open(out_path, "w", encoding="utf-8") as fh:
                         fh.write(body)

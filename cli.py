@@ -77,7 +77,8 @@ def _cli():
         import logging
         logging.getLogger("werkzeug").setLevel(logging.ERROR)  # silence the request log + "Running on" banner
         host = "127.0.0.1"
-        app = create_app(db_path=db_path)
+        # The long-term DB is the baseline for the dashboard's /changes page (when it's showing a fresh scan).
+        app = create_app(db_path=db_path, baseline_db=os.path.normpath(db_manager.DEFAULT_DB_PATH))
         def _serve():
             try:
                 run_simple(host, port, app, use_reloader=False, use_debugger=False, threaded=True)
@@ -264,9 +265,20 @@ def _cli():
         if baseline_db:
             import insight
             with db_manager.Database(session["db"]) as _cur, db_manager.Database(baseline_db) as _base:
-                _changes = insight.diff_databases(_cur, _base)
-            print(Panel(f"Since your last save: {insight.summarise_diff(_changes)}.",
-                        title="What changed", style="cyan"))
+                _changes = insight.diff_databases(_cur, _base, root=os.path.abspath(directory))
+            body = f"Since your last save: {escape(insight.summarise_diff(_changes))}."
+            if _changes["new_findings"]:
+                # New security findings are the headline -> list the first few right here.
+                body += "\n"
+                for f in _changes["new_findings"][:8]:
+                    loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
+                    body += f"\n  [red]{escape(str(f['severity']))}[/] {escape(str(f['rule']))}  [dim]{escape(loc)}[/]"
+                if len(_changes["new_findings"]) > 8:
+                    body += f"\n  [dim]... and {len(_changes['new_findings']) - 8} more[/]"
+            if insight.has_changes(_changes):
+                body += "\n[dim]Full breakdown: Explore -> 'What changed since last save' (or the web Changes page).[/]"
+            print(Panel(body, title="What changed",
+                        style="red" if _changes["new_findings"] else "cyan"))
         # Opt-in: weigh in on the uncertain ones with the arbiter, then drop into review, before the user moves on.
         if rt["cfg"]["arbiter"]["enabled"] and rt["cfg"]["arbiter"]["run_after_scan"]:
             sug = _arbitrate(session["db"], ask=False)
@@ -576,7 +588,7 @@ def _cli():
                 print("Bye! 🐳")
                 return
             if action.startswith("Explore"):
-                do_browse(session["db"])
+                do_browse(session["db"], baseline_db=permanent_db)
             elif action.endswith("long-term"):
                 do_save_longterm()
                 _pause()

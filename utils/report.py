@@ -6,6 +6,7 @@
 
 from datetime import datetime
 import json
+import os
 
 import utils
 from utils import human_size as _human_size
@@ -33,16 +34,26 @@ def _overview(projects):
     }
 
 
-def build_report(db_path):
+def build_report(db_path, baseline_db=None):
     """
     Assemble the full workspace report as a plain dict (JSON-serialisable throughout).
 
     Opens its own read-only connection so either front-end can call it with just a path.
     Every section mirrors a view the tool already shows on screen, so the export never drifts from the live UI.
+    With 'baseline_db' (a different database, e.g. the long-term one) a "changes" section is added:
+    what changed in this scan since that baseline (see insight.diff_databases). Otherwise it's None.
     """
+    changes = None
+    if baseline_db and os.path.exists(baseline_db) and \
+            os.path.abspath(baseline_db) != os.path.abspath(db_path):
+        import insight
+        with utils.open_db(db_path) as cur, utils.open_db(baseline_db) as base:
+            changes = insight.diff_databases(cur, base)
+            changes["baseline"] = baseline_db
     with utils.open_db(db_path) as db:
         projects = db.all_projects()
         return {
+            "changes": changes,
             "meta": {
                 "tool": "MnemoCetus",
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -117,6 +128,53 @@ def render_markdown(report):
           f"{scan['file_count']} file(s), {_human_size(scan['total_bytes'] or 0)} "
           f"(finished {scan['finished_at']})")
     w("")
+
+    # Changes since the baseline (only when the report was built against one).
+    ch = report.get("changes")
+    if ch is not None:
+        import insight
+        w("## Changes since last save")
+        w("")
+        w(f"Compared `{ch['root']}` against `{ch['baseline']}`: {insight.summarise_diff(ch)}.")
+        w("")
+        if ch["new_findings"]:
+            w("### New security findings")
+            w("")
+            w(_md_table(["severity", "kind", "rule", "location", "detail"],
+                        [[f["severity"], f["kind"], f["rule"],
+                          f"{f['path']}:{f['line']}" if f["line"] else f["path"], f["detail"]]
+                         for f in ch["new_findings"]]))
+            w("")
+        if ch["resolved_findings"]:
+            w("### Resolved findings")
+            w("")
+            w(_md_table(["severity", "rule", "location"],
+                        [[f["severity"], f["rule"], f["path"]] for f in ch["resolved_findings"]]))
+            w("")
+        if ch["unchecked"]:
+            w(f"_Findings not compared for {len(ch['unchecked'])} project(s): one of the two scans "
+              f"ran without the secret scan._")
+            w("")
+        if ch["new_bloat"]:
+            w("### New reclaimable bloat")
+            w("")
+            w(_md_table(["directory", "kind", "size"],
+                        [[m["path"], m["kind"] or "?", _human_size(m["size_bytes"] or 0)] for m in ch["new_bloat"]]))
+            w("")
+        for key, title in (("new", "New projects"), ("removed", "Removed projects")):
+            if ch[key]:
+                w(f"### {title}")
+                w("")
+                w(_md_table(["project", "language", "size"],
+                            [[x["path"], x["language"] or "?", _human_size(x["size_bytes"])] for x in ch[key]]))
+                w("")
+        if ch["grown"]:
+            w("### Size changes")
+            w("")
+            w(_md_table(["project", "change", "now"],
+                        [[g["path"], ("+" if g["delta_bytes"] > 0 else "-") + _human_size(abs(g["delta_bytes"])),
+                          _human_size(g["size_bytes"])] for g in ch["grown"]]))
+            w("")
 
     # Overview.
     w("## Overview")
