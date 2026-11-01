@@ -66,9 +66,24 @@ def load():
 def save(settings):
     """Persist the known settings to disk. Returns True on success, False if the write failed."""
     data = _project(DEFAULTS, settings)
+    # Atomic: write a temp file beside it, fsync, then rename over the real one. A crash / full disk
+    # mid-write used to leave truncated JSON -> load() fell back to defaults, silently resetting
+    # 'configured' and the arbiter setup.
+    import tempfile
+    folder = os.path.dirname(SETTINGS_PATH) or "."
+    tmp = None
     try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        fd, tmp = tempfile.mkstemp(prefix=".mnemocetus.", suffix=".tmp", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS_PATH)
         return True
     except OSError:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         return False

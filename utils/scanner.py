@@ -360,7 +360,8 @@ class Scanner:
                 cat_votes.append(("library", W_MARKER))
             elif has("src", "main.rs"):
                 cat_votes.append(("application", W_MARKER))
-            rs_table = _load_toml(os.path.join(directory, "Cargo.toml")).get("dependencies", {}) or {}
+            rs_table = _load_toml(os.path.join(directory, "Cargo.toml")).get("dependencies")
+            rs_table = rs_table if isinstance(rs_table, dict) else {}  # `dependencies = "x"` is valid TOML
             # Cargo dep values are either a version string or a table ({version = "1.3", ...}).
             rs_deps = {name: (v if isinstance(v, str) else (v.get("version", "") if isinstance(v, dict) else ""))
                        for name, v in rs_table.items()}
@@ -643,6 +644,9 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     import gitinfo  # local import -> git awareness is optional
 
     sc = _default()
+    # The classify cache is keyed on a dir's OWN mtime, but its results hold subtree sizes + parsed deps:
+    # editing requirements.txt in place (or growing src/) doesn't move it -> start every scan fresh.
+    sc._cache.clear()
     files = sc.scan(directory, confirm_filters=confirm_filters)
     rels = sc.resolve_relationships(files, mode)
     sizes, mtimes = sc._sizes, sc._mtimes  # captured during the walk above -> reused, never re-stat-ed
@@ -651,12 +655,43 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
 
     # Nested projects: each project OWNS its subtree minus any child project's subtree. Without this a
     # parent re-counts every child's files, bloat and secrets (double totals, duplicate rm suggestions).
-    project_paths = sorted(os.path.normpath(p) for p in rels)
-    children_of = {p: [q for q in project_paths if q.startswith(p + os.sep)] for p in project_paths}
+    #
+    # Ownership is resolved ONCE for the whole scan by walking each path up to its nearest project dir
+    # (O(files x depth)), instead of every project filtering the full file list (O(projects x files) ->
+    # minutes on a workspace with thousands of projects and hundreds of thousands of files).
+    project_set = {os.path.normpath(p) for p in rels}
 
-    def _owned(path, base, children):
-        return (path == base or path.startswith(base + os.sep)) and not any(
-            path == c or path.startswith(c + os.sep) for c in children)
+    def _owner(path):
+        """The nearest project dir that is 'path' itself or contains it, or None."""
+        d = path
+        while True:
+            if d in project_set:
+                return d
+            parent = os.path.dirname(d)
+            if parent == d:
+                return None
+            d = parent
+
+    owned_files, owned_extra, children_of = {}, {}, {}
+    for f in files:
+        nf = os.path.normpath(f)
+        o = _owner(os.path.dirname(nf))
+        if o is not None:
+            size = sizes.get(nf)
+            if size is None:
+                try:
+                    size = os.path.getsize(nf)
+                except OSError:
+                    continue
+            owned_files.setdefault(o, []).append((nf, size))
+    for path, m in extra_mtimes.items():
+        o = _owner(path)
+        if o is not None:
+            owned_extra[o] = max(owned_extra.get(o, 0.0), m)
+    for q in project_set:  # direct child projects -> the walks below stop at them (each reports its own)
+        o = _owner(os.path.dirname(q))
+        if o is not None and o != q:
+            children_of.setdefault(o, []).append(q)
 
     def _prepare(item):
         """Read-only, independent per-project work -> safe to run in parallel."""
@@ -664,15 +699,12 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
         base = os.path.normpath(project)
         children = children_of.get(base, [])
         record = _project_record(project, info)
-        inventory = _collect_files(project, sc._name_rules, sc._path_rules, files, sizes)  # file list
-        if children:
-            inventory = [(p, sz) for p, sz in inventory if _owned(p, base, children)]
+        inventory = owned_files.get(base, [])  # this project's own files (child projects excluded)
         # Git + content signals -> feed change detection, the diff, the at-risk flags, and the v1.0 light.
         gi = gitinfo.status(project)
         # Newest mtime across the project's own files, hidden files (.env) and directories (adds/deletes).
-        own_extra = (m for p, m in extra_mtimes.items() if _owned(p, base, children))
         content_mtime = max(max((mtimes.get(p, 0.0) for p, _ in inventory), default=0.0),
-                            max(own_extra, default=0.0)) or None
+                            owned_extra.get(base, 0.0)) or None
         record["git_branch"] = gi.get("branch")
         record["git_head"] = gi.get("head")
         record["git_dirty"] = gi.get("dirty", False)
@@ -723,14 +755,15 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
             for record, marks, inventory, findings, reused in ex.map(_prepare, items):
                 if reused:
                     skipped += 1
-                pid = db.upsert_project(record, scan_id=scan_id)
-                # Dependencies tagged with ecosystem + declared version spec -> feeds the conflict check.
-                db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],
-                                     specs=record["dependency_specs"])
-                db.save_marks(pid, marks)                       # reclaimable marks
-                db.save_files(pid, inventory)                   # per-project inventory (storage analyser)
-                if security:
-                    db.save_security_findings(pid, findings)    # MnemoScan (values already masked)
+                with db.batch():  # one transaction (one commit) per project, not one per table write
+                    pid = db.upsert_project(record, scan_id=scan_id)
+                    # Dependencies tagged with ecosystem + declared version spec -> feeds the conflict check.
+                    db.save_dependencies(pid, record["dependencies"], ecosystem=record["language"],
+                                         specs=record["dependency_specs"])
+                    db.save_marks(pid, marks)                       # reclaimable marks
+                    db.save_files(pid, inventory)                   # per-project inventory (storage analyser)
+                    if security:
+                        db.save_security_findings(pid, findings)    # MnemoScan (values already masked)
                 total_files += len(inventory)                   # OWN files only -> nested projects
                 total_bytes += sum(sz for _, sz in inventory)   # aren't counted twice in the scan totals
                 done += 1
