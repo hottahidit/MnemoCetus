@@ -4,3 +4,5 @@ PLAN.md
 __pycache__/
 exclude_list/custom_exclude_list.txt
 *.db
+*.db-wal
+*.db-shm

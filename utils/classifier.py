@@ -79,12 +79,29 @@ def _empty_metrics():
 
 ## -- MANIFEST READERS -------------------------------------------------------------------- ##
 def _safe_read(path, limit=1_000_000):
-    """Read a text file defensively (size-capped)."""
+    """
+    Read a text file defensively (size-capped), honouring a byte-order mark. Windows PowerShell's
+    `pip freeze > requirements.txt` writes UTF-16 -> read as UTF-8 that became a NUL-riddled mess
+    (deps like 'f', '\x00', ...).
+    """
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read(limit)
+        with open(path, "rb") as f:
+            raw = f.read(limit)
     except OSError:
         return ""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", errors="ignore")
+    return raw.decode("utf-8-sig", errors="ignore")
+
+
+def _as_dict(value):
+    """A manifest section that should be a table -> {} when a valid-but-odd file has something else there."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value):
+    """A manifest section that should be an array -> [] when it isn't (e.g. `dependencies = "x"`)."""
+    return value if isinstance(value, list) else []
 
 def _load_json(path):
     try:
@@ -106,12 +123,48 @@ def _dep_name(spec):
     """Reduce a requirement string (e.g. 'Django>=4.0; extra') to its bare package name."""
     return re.split(r"[<>=!~;[]", spec, maxsplit=1)[0].strip().lower()
 
+# A PEP 508 project name (what pip accepts as a package name).
+_PEP508_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+
+def _requirement_lines(text):
+    """
+    The requirement entries of a requirements.txt, skipping what ISN'T a package:
+      - comments (full-line and trailing ' # ...') and blank lines; '\\' line continuations are joined
+      - pip options: -r/-c (other files), -e (editable installs), -i/--index-url, --hash, ...
+      - bare URLs / VCS refs / local paths (git+https://..., ./pkg, /abs/path.whl)
+    'name @ https://...' (a PEP 508 direct reference) is kept as 'name'.
+    """
+    joined, buf = [], ""
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].rstrip()
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        joined.append(buf + line)
+        buf = ""
+    if buf:
+        joined.append(buf)
+    for line in joined:
+        line = line.strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        if " @ " in line:
+            line = line.split(" @ ", 1)[0].strip()
+        elif "://" in line or line.startswith((".", "/", "~")) or "\\" in line:
+            continue
+        yield line
+
+
 def _dep_name_spec(spec):
     """Split a requirement string ('Django>=4.0,<5 ; python_version>3') into (bare name, version spec)."""
+    if not isinstance(spec, str):
+        return "", ""
     spec = spec.split(";", 1)[0].strip()  # drop environment markers
     m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$", spec)
     if not m:
-        return _dep_name(spec), ""
+        name = _dep_name(spec)
+        return (name, "") if _PEP508_NAME.match(name or "") else ("", "")
     return m.group(1).lower(), m.group(2).strip()
 ## ---------------------------------------------------------------------------------------- ##
 
@@ -121,20 +174,20 @@ def _python_dependencies(directory):
     deps = {}
     req = os.path.join(directory, "requirements.txt")
     if os.path.exists(req):
-        for line in _safe_read(req).splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                name, spec = _dep_name_spec(line)
-                if name:
-                    deps.setdefault(name, spec)
+        for line in _requirement_lines(_safe_read(req)):
+            name, spec = _dep_name_spec(line)
+            if name:
+                deps.setdefault(name, spec)
+    # Every lookup below tolerates valid-TOML-but-odd shapes (a string where a table belongs, ...) -> a
+    # strange pyproject.toml can't abort the whole scan.
     data = _load_toml(os.path.join(directory, "pyproject.toml"))
-    for entry in data.get("project", {}).get("dependencies", []) or []:
+    for entry in _as_list(_as_dict(data.get("project")).get("dependencies")):
         name, spec = _dep_name_spec(entry)
         if name:
             deps.setdefault(name, spec)
-    poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-    for name, constraint in (poetry or {}).items():
-        if name.lower() != "python":
+    poetry = _as_dict(_as_dict(_as_dict(data.get("tool")).get("poetry")).get("dependencies"))
+    for name, constraint in poetry.items():
+        if isinstance(name, str) and name.lower() != "python":
             deps.setdefault(name.lower(), constraint if isinstance(constraint, str) else "")
     return deps
 

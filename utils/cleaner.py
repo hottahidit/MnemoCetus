@@ -4,6 +4,7 @@
 # Detection only: it never deletes anything (the recommendations layer lives in db_manager.cleanup_recommendations).
 
 import os
+import stat
 
 from scanner import _is_excluded  # reuse the scan's exclusion test, so "excluded but not reclaimable" (e.g. .git) is handled identically
 
@@ -31,15 +32,35 @@ RECLAIMABLE_MARKERS = {
 }
 
 def _dir_size(path):
-    """Total (size_bytes, file_count) of a directory subtree -> a 'du' used to weigh a mark."""
+    """
+    (size_bytes, file_count) of a directory subtree -> a 'du' used to weigh a mark.
+
+    size_bytes is what DELETING the tree would actually free, which a naive sum overstates:
+      - symlinks are never followed (their target lives elsewhere; deleting the link frees nothing)
+      - a hard-linked file only counts once ALL of its links are inside this tree. pnpm's node_modules
+        hard-links every file to a global store, so deleting it frees ~nothing -> it must not show as GBs.
+    file_count still counts every regular file entry.
+    """
+    if os.path.islink(path):
+        return 0, 0
     total_bytes = total_files = 0
-    for root, _dirs, files in os.walk(path):
+    links_seen = {}  # (st_dev, st_ino) -> how many of this inode's links we've met inside the tree
+    for root, _dirs, files in os.walk(path):  # followlinks=False -> symlinked sub-dirs aren't descended
         for f in files:
             try:
-                total_bytes += os.path.getsize(os.path.join(root, f))
-                total_files += 1
+                st = os.lstat(os.path.join(root, f))
             except OSError:
                 continue
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                continue
+            total_files += 1
+            if st.st_nlink <= 1:
+                total_bytes += st.st_size
+                continue
+            key = (st.st_dev, st.st_ino)
+            links_seen[key] = links_seen.get(key, 0) + 1
+            if links_seen[key] == st.st_nlink:  # every link is in here -> deleting frees the data
+                total_bytes += st.st_size
     return total_bytes, total_files
 
 def _collect_marks(directory, name_rules, path_rules, skip=()):
@@ -67,6 +88,8 @@ def _collect_marks(directory, name_rules, path_rules, skip=()):
             full = os.path.join(root, d)
             if skip and os.path.normpath(full) in skip:
                 continue  # a nested project -> it reports its own marks
+            if os.path.islink(full):
+                continue  # a symlinked 'venv' points elsewhere -> not reclaimable here (the Reclaimer refuses it too)
             marker = RECLAIMABLE_MARKERS.get(d)
             if marker:
                 kind, reason = marker

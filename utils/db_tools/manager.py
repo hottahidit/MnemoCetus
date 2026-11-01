@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import os
 import json
 import sqlite3
+from contextlib import contextmanager
 
 from db_tools.analytics import AnalyticsMixin
 
@@ -64,10 +65,46 @@ class Database(AnalyticsMixin):
         """
         self.db_path = db_path
         self.schema_path = schema_path
-        self.con = sqlite3.connect(db_path)
+        # timeout -> wait up to 30s for a lock instead of failing at once with "database is locked"
+        # (the web dashboard thread reads the same file a scan is writing).
+        self.con = sqlite3.connect(db_path, timeout=30)
         self.con.row_factory = sqlite3.Row            # rows behave like dicts
         self.con.execute("PRAGMA foreign_keys = ON")  # per-connection; off by default
+        if db_path != ":memory:":
+            # WAL: readers never block the writer (and vice versa) -> the dashboard stays responsive during a
+            # scan. Some filesystems (network shares, WSL's /mnt/c) can't do WAL; then stay on the default.
+            try:
+                self.con.execute("PRAGMA journal_mode = WAL")
+                self.con.execute("PRAGMA synchronous = NORMAL")  # safe with WAL, far fewer fsyncs
+            except sqlite3.DatabaseError:
+                pass
+        self._batch_depth = 0
         self._initialise()
+
+    # -- Transactions -------------------------------------------------------- #
+    def _commit(self):
+        """Commit now, unless we're inside batch() -> then the batch commits once at its end."""
+        if not self._batch_depth:
+            self.con.commit()
+
+    @contextmanager
+    def batch(self):
+        """
+        Group many writes into ONE transaction: `with db.batch(): ...`. A scan stores ~5 rows per project
+        (project, deps, marks, files, findings), each of which used to commit -> one fsync apiece. Nested
+        batches join the outer one; an exception rolls the whole batch back.
+        """
+        self._batch_depth += 1
+        try:
+            yield self
+        except BaseException:
+            self._batch_depth -= 1
+            if not self._batch_depth:
+                self.con.rollback()
+            raise
+        self._batch_depth -= 1
+        if not self._batch_depth:
+            self.con.commit()
 
     # -- Setup / Migrations -------------------------------------------------- #
     def _initialise(self):
@@ -226,7 +263,7 @@ class Database(AnalyticsMixin):
             "INSERT INTO scans (root_path, started_at) VALUES (?, ?)",
             (root_path, _now()),
         )
-        self.con.commit()
+        self._commit()
         return cur.lastrowid
 
     def finish_scan(self, scan_id, project_count=0, file_count=0, total_bytes=0):
@@ -236,7 +273,7 @@ class Database(AnalyticsMixin):
             "total_bytes = ? WHERE id = ?",
             (_now(), project_count, file_count, total_bytes, scan_id),
         )
-        self.con.commit()
+        self._commit()
     # ------------------------------------------------------------------------ #
 
     # -- Projects ------------------------------------------------------------ #
@@ -337,7 +374,7 @@ class Database(AnalyticsMixin):
             """,
             row,
         )
-        self.con.commit()
+        self._commit()
         return self.con.execute(
             "SELECT id FROM projects WHERE path = ?", (path,)
         ).fetchone()[0]
@@ -362,7 +399,7 @@ class Database(AnalyticsMixin):
             "INSERT OR IGNORE INTO dependencies (project_id, name, ecosystem, version_spec) VALUES (?, ?, ?, ?)",
             [(project_id, n, ecosystem, specs.get(n) or None) for n in names],
         )
-        self.con.commit()
+        self._commit()
 
     def save_files(self, project_id, files, replace=True):
         """
@@ -388,7 +425,7 @@ class Database(AnalyticsMixin):
             "VALUES (?, ?, ?, ?)",
             rows,
         )
-        self.con.commit()
+        self._commit()
 
     def save_marks(self, project_id, marks, replace=True):
         """
@@ -408,7 +445,7 @@ class Database(AnalyticsMixin):
             [(project_id, m.get("kind"), m.get("name"), m["path"],
               m.get("size_bytes", 0), m.get("file_count", 0), m.get("reason")) for m in marks],
         )
-        self.con.commit()
+        self._commit()
 
     def save_security_findings(self, project_id, findings, replace=True):
         """
@@ -427,7 +464,7 @@ class Database(AnalyticsMixin):
             [(project_id, f.get("kind"), f.get("rule"), f.get("severity"),
               f.get("path"), f.get("line", 0), f.get("detail")) for f in findings],
         )
-        self.con.commit()
+        self._commit()
 
     def merge_from(self, src_db_path, only_paths=None):
         """
@@ -444,54 +481,59 @@ class Database(AnalyticsMixin):
         """
         src = Database(src_db_path)
         try:
-            merged = 0
-            for row in src.con.execute("SELECT * FROM projects").fetchall():
-                if only_paths is not None and row["path"] not in only_paths:
-                    continue
-                src_pid = row["id"]
-                pid = self.upsert_project({
-                    "path": row["path"], "language": row["language"], "category": row["category"],
-                    "confidence": row["confidence"],
-                    "frameworks": _loads(row["frameworks"]), "markers": _loads(row["markers"]),
-                    "breakdown": _loads_breakdown(row["breakdown"]),
-                    "metrics": {"file_count": row["file_count"], "size_bytes": row["size_bytes"],
-                                "dependency_count": row["dependency_count"]},
-                    "parent_path": row["parent_path"], "role": row["role"],
-                    "is_symlink": bool(row["is_symlink"]), "symlink_target": row["symlink_target"],
-                    "reclaimable_bytes": row["reclaimable_bytes"],
-                    # git + change-detection state -> without these the saved DB can never serve as an
-                    # incremental baseline, and its Git page / at-risk view come up empty.
-                    "git_branch": row["git_branch"], "git_head": row["git_head"],
-                    "git_dirty": None if row["git_dirty"] is None else bool(row["git_dirty"]),
-                    "git_ahead": row["git_ahead"], "git_last_commit": row["git_last_commit"],
-                    "content_mtime": row["content_mtime"], "git_root": row["git_root"],
-                    "security_scanned": bool(row["security_scanned"]),
-                })
-                deps = src.con.execute(
-                    "SELECT name, ecosystem, version_spec FROM dependencies WHERE project_id = ?", (src_pid,)).fetchall()
-                # Keep each dependency's OWN ecosystem (a project can mix python + npm deps).
-                by_eco = {}
-                for d in deps:
-                    by_eco.setdefault(d["ecosystem"], []).append(d)
-                self.save_dependencies(pid, [], replace=True)  # clear, then add each ecosystem's group
-                for eco, group in by_eco.items():
-                    self.save_dependencies(pid, [d["name"] for d in group], ecosystem=eco,
-                                           specs={d["name"]: d["version_spec"] for d in group}, replace=False)
-                self.save_files(pid, [(f["path"], f["size_bytes"]) for f in src.con.execute(
-                    "SELECT path, size_bytes FROM files WHERE project_id = ?", (src_pid,))])
-                self.save_marks(pid, [dict(m) for m in src.con.execute(
-                    "SELECT kind, name, path, size_bytes, file_count, reason FROM marks WHERE project_id = ?", (src_pid,))])
-                self.save_security_findings(pid, [dict(s) for s in src.con.execute(
-                    "SELECT kind, rule, severity, path, line, detail FROM security_findings WHERE project_id = ?", (src_pid,))])
-                if row["user_confirmed"]:  # carry the user's override across the merge
-                    self.set_override(row["path"], language=row["override_language"],
-                                      category=row["override_category"],
-                                      frameworks=_loads(row["override_frameworks"]), note=row["override_note"])
-                merged += 1
-            self.recompute_relationships()
-            return merged
+            with self.batch():  # all-or-nothing: a failure mid-merge leaves the long-term DB untouched
+                return self._merge_rows(src, only_paths)
         finally:
             src.close()
+
+    def _merge_rows(self, src, only_paths):
+        """The body of merge_from (runs inside its batch)."""
+        merged = 0
+        for row in src.con.execute("SELECT * FROM projects").fetchall():
+            if only_paths is not None and row["path"] not in only_paths:
+                continue
+            src_pid = row["id"]
+            pid = self.upsert_project({
+                "path": row["path"], "language": row["language"], "category": row["category"],
+                "confidence": row["confidence"],
+                "frameworks": _loads(row["frameworks"]), "markers": _loads(row["markers"]),
+                "breakdown": _loads_breakdown(row["breakdown"]),
+                "metrics": {"file_count": row["file_count"], "size_bytes": row["size_bytes"],
+                            "dependency_count": row["dependency_count"]},
+                "parent_path": row["parent_path"], "role": row["role"],
+                "is_symlink": bool(row["is_symlink"]), "symlink_target": row["symlink_target"],
+                "reclaimable_bytes": row["reclaimable_bytes"],
+                # git + change-detection state -> without these the saved DB can never serve as an
+                # incremental baseline, and its Git page / at-risk view come up empty.
+                "git_branch": row["git_branch"], "git_head": row["git_head"],
+                "git_dirty": None if row["git_dirty"] is None else bool(row["git_dirty"]),
+                "git_ahead": row["git_ahead"], "git_last_commit": row["git_last_commit"],
+                "content_mtime": row["content_mtime"], "git_root": row["git_root"],
+                "security_scanned": bool(row["security_scanned"]),
+            })
+            deps = src.con.execute(
+                "SELECT name, ecosystem, version_spec FROM dependencies WHERE project_id = ?", (src_pid,)).fetchall()
+            # Keep each dependency's OWN ecosystem (a project can mix python + npm deps).
+            by_eco = {}
+            for d in deps:
+                by_eco.setdefault(d["ecosystem"], []).append(d)
+            self.save_dependencies(pid, [], replace=True)  # clear, then add each ecosystem's group
+            for eco, group in by_eco.items():
+                self.save_dependencies(pid, [d["name"] for d in group], ecosystem=eco,
+                                       specs={d["name"]: d["version_spec"] for d in group}, replace=False)
+            self.save_files(pid, [(f["path"], f["size_bytes"]) for f in src.con.execute(
+                "SELECT path, size_bytes FROM files WHERE project_id = ?", (src_pid,))])
+            self.save_marks(pid, [dict(m) for m in src.con.execute(
+                "SELECT kind, name, path, size_bytes, file_count, reason FROM marks WHERE project_id = ?", (src_pid,))])
+            self.save_security_findings(pid, [dict(s) for s in src.con.execute(
+                "SELECT kind, rule, severity, path, line, detail FROM security_findings WHERE project_id = ?", (src_pid,))])
+            if row["user_confirmed"]:  # carry the user's override across the merge
+                self.set_override(row["path"], language=row["override_language"],
+                                  category=row["override_category"],
+                                  frameworks=_loads(row["override_frameworks"]), note=row["override_note"])
+            merged += 1
+        self.recompute_relationships()
+        return merged
 
     def _nearest_ancestor_path(self, path, pathset):
         """The closest ancestor directory of 'path' that is itself a project path in 'pathset', or None."""
@@ -514,7 +556,7 @@ class Database(AnalyticsMixin):
             parent = self._nearest_ancestor_path(r["path"], pathset)
             self.con.execute("UPDATE projects SET parent_path = ?, role = ? WHERE id = ?",
                              (parent, "child" if parent else "root", r["id"]))
-        self.con.commit()
+        self._commit()
     # ------------------------------------------------------------------------ #
 
     # -- Reads --------------------------------------------------------------- #
@@ -535,10 +577,18 @@ class Database(AnalyticsMixin):
             return None
         return self._inflate_project(row)
 
+    def _deps_by_project(self, project_ids=None):
+        """{project_id: [dep names]} in ONE query (inflating rows one-by-one was a query per project)."""
+        out = {}
+        for r in self.con.execute("SELECT project_id, name FROM dependencies ORDER BY name"):
+            out.setdefault(r["project_id"], []).append(r["name"])
+        return out
+
     def all_projects(self):
         """Return every indexed project (each as a dict), ordered by path."""
         rows = self.con.execute("SELECT * FROM projects ORDER BY path").fetchall()
-        return [self._inflate_project(r) for r in rows]
+        deps = self._deps_by_project()
+        return [self._inflate_project(r, deps.get(r["id"], [])) for r in rows]
 
     def find_projects(self, language=None, category=None, framework=None):
         """
@@ -561,7 +611,8 @@ class Database(AnalyticsMixin):
             params.append(category)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self.con.execute(f"SELECT * FROM projects {where} ORDER BY path", params).fetchall()
-        projects = [self._inflate_project(r) for r in rows]
+        deps = self._deps_by_project() if len(rows) > 1 else None
+        projects = [self._inflate_project(r, deps.get(r["id"], []) if deps is not None else None) for r in rows]
         if framework:
             projects = [p for p in projects if framework in p["frameworks"]]
         return projects
@@ -599,7 +650,7 @@ class Database(AnalyticsMixin):
         row = self.con.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
-    def _inflate_project(self, row):
+    def _inflate_project(self, row, deps=None):
         """
         Turn a raw projects row into a friendly dict (JSON columns -> lists/objects, + deps).
 
@@ -616,7 +667,7 @@ class Database(AnalyticsMixin):
         data["git_dirty"] = None if data.get("git_dirty") is None else bool(data["git_dirty"])
         data["user_confirmed"] = bool(data.get("user_confirmed"))
         data["override_frameworks"] = _loads(data.get("override_frameworks"))
-        data["dependencies"] = [d["name"] for d in self.get_dependencies(data["id"])]
+        data["dependencies"] = deps if deps is not None else [d["name"] for d in self.get_dependencies(data["id"])]
 
         # Keep the raw auto-detection, then let a confirmed override win on the headline fields.
         data["auto"] = {
@@ -678,7 +729,7 @@ class Database(AnalyticsMixin):
                    "override_frameworks = ?, override_note = ?, user_confirmed = 1, updated_at = ? "
                    "WHERE path = ?")
         cur = self.con.execute(sql, (language, category, _json_or_none(frameworks), note, _now(), path))
-        self.con.commit()
+        self._commit()
         return cur.rowcount > 0
 
     def approve(self, path):
@@ -694,7 +745,7 @@ class Database(AnalyticsMixin):
             "UPDATE projects SET user_confirmed = 1, updated_at = ? WHERE path = ?",
             (_now(), path),
         )
-        self.con.commit()
+        self._commit()
         return cur.rowcount > 0
 
     def clear_override(self, path):
@@ -706,7 +757,7 @@ class Database(AnalyticsMixin):
             "WHERE path = ?",
             (_now(), path),
         )
-        self.con.commit()
+        self._commit()
         return cur.rowcount > 0
     # ------------------------------------------------------------------------ #
 
@@ -720,7 +771,7 @@ class Database(AnalyticsMixin):
         """
         path = os.path.normpath(os.path.abspath(path))
         cur = self.con.execute("DELETE FROM projects WHERE path = ?", (path,))
-        self.con.commit()
+        self._commit()
         return cur.rowcount > 0
     # ------------------------------------------------------------------------ #
 

@@ -82,6 +82,28 @@ def _directory_facts(directory):
     return facts
 
 
+def _session_db_path():
+    """
+    Where the temporary session scan lives -> a PRIVATE per-user directory (0700), not a fixed shared
+    /tmp/mnemocetus_session.db that another local user could pre-create (crashing the os.remove on the
+    next scan, or feeding the dashboard their own data).
+    """
+    import tempfile
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    uid = os.getuid() if hasattr(os, "getuid") else os.environ.get("USERNAME", "user")
+    d = os.path.join(base, f"mnemocetus-{uid}")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        st = os.lstat(d)
+        if os.path.islink(d) or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            d = tempfile.mkdtemp(prefix="mnemocetus-")  # someone else owns / planted it -> use a fresh private dir
+        else:
+            os.chmod(d, 0o700)
+    except OSError:
+        d = tempfile.mkdtemp(prefix="mnemocetus-")
+    return os.path.join(d, "session.db")
+
+
 class _Cancelled(Exception):
     """A prompt was cancelled (questionary returns None on Ctrl-C) -> abort the whole multi-step flow."""
 
@@ -109,7 +131,7 @@ def _cli():
     # The current scan is held in a TEMPORARY database (overwritten on each new scan) -> "save long-term" copies it to the permanent database.
     # Every other feature runs against whatever db path is passed in.
     session = {
-        "db": os.path.join(tempfile.gettempdir(), "mnemocetus_session.db"),
+        "db": _session_db_path(),
         "root": None, "mode": "CLASSIFY", "security": True, "count": 0, "saved": False,
     }
     # Runtime state that isn't scan-specific: the loaded user settings and the web dashboard's URL once it's up.
@@ -292,8 +314,9 @@ def _cli():
         if secrets is None:
             return
         # Fresh temporary store -> each scan replaces the last, so it's only held until the next scan.
-        if os.path.exists(session["db"]):
-            os.remove(session["db"])
+        for _f in (session["db"], session["db"] + "-wal", session["db"] + "-shm"):  # + WAL side-files
+            if os.path.exists(_f):
+                os.remove(_f)
         # An existing long-term DB is the baseline -> unchanged projects are reused (incremental) and we
         # can report what changed since it. The first-ever scan has no baseline (a full scan).
         baseline_db = permanent_db if os.path.exists(permanent_db) else None
