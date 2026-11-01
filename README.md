@@ -52,17 +52,22 @@ Working today:
   version-conflict check flagging which projects could share one virtualenv vs. which clash on pins
 * **Security scan** ("MnemoScan") - flag hard-coded secrets (API keys, tokens, private keys; values
   are masked, never stored raw) during a scan, plus an optional dependency-vulnerability audit that
-  shells out to pip-audit / npm audit when they're installed
+  shells out to pip-audit / npm audit when they're installed, an optional **full git-history secret
+  scan** (catches secrets that were committed and later "removed" - they live on in history), and
+  `.env` / un-ignored-bloat hygiene checks for git repos
 * A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
   recategorisation, cleanup recommendations, dependency overlap, storage analysis, and security findings
 
 Planned:
 
+* **Git-aware workspace** (v0.9) - per-project git status (branch / clean-dirty / ahead-behind / stale),
+  git-powered change detection ("what changed since last scan"), plus `.git` bloat and `.env` / ignore
+  hygiene checks
 * **Archive & reclaim** - recommend pushing stale repositories to a private remote, then (safely, only once
   everything is backed up) removing them locally to free space while preserving the project
 * **Shell companion** (v1.0) - an installed `mnemc` subcommand CLI, a git-style shell-prompt status light
   (green = up to date / amber = changes / red = vulnerabilities), and the web dashboard as a report surface
-* Web dashboard git columns; deeper security scanning (git-history secret scan, more detectors)
+* Deeper security scanning (more secret detectors, richer audit integration)
 
 ---
 
@@ -70,12 +75,11 @@ Planned:
 
 DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
 
-Active development, at **v0.9 - the git-aware workspace**: per-project git status (branch / clean-dirty /
-ahead-behind), **incremental scans** (unchanged projects are skipped via git commit / mtime), a "what
-changed since last save" diff, at-risk flags (uncommitted / unpushed / stale), a `git gc` reclaim
-recommendation, and exposed-`.env` detection. Built on v0.5 (dependency intelligence + the **MnemoScan**
-security layer), the v0.6 UI overhaul, an opt-in **AI arbiter** (v0.8), and a parallelised scanner. See
-the roadmap.
+Active development, at **v0.8**. Since the v0.5 line (dependency intelligence + the **MnemoScan** security
+layer) and the v0.6 UI overhaul: report export; an opt-in **AI arbiter** for low-confidence projects
+(local-first, Ollama by default); a **parallelised scanner** with auto-tuning + a progress bar; and a
+package tidy-up (`cli.py` is now the entry point at the repo root, with the engine modules under `utils/`).
+**v0.9 - the git-aware workspace** - is in progress. See the roadmap.
 
 ---
 
@@ -109,9 +113,14 @@ Run the interactive tool:
 python cli.py
 ```
 
-You **scan a directory first** - choosing how nested projects are handled (CLASSIFY / SKIP / MERGE /
-SPLIT, each with an inline description on highlight and a recommended default). The scan (which also
-flags secrets) is **auto-held in a temporary database** until your next scan; you can then **save it
+You **scan a directory first**, then choose its **scope** - the whole directory (a normal project
+scan), or a **hand-picked set of files** (a tree picker, glob patterns, or explicit paths; files can
+come from different subfolders without scanning the parent). A hand-picked set runs a **targeted,
+display-only scan** - MnemoScan secrets plus a size inventory, with nothing written to the database,
+since a loose file set isn't a project. A whole-directory scan then asks how nested projects are
+handled (CLASSIFY / SKIP / MERGE / SPLIT, each with an inline description on highlight and a
+recommended default). The scan (which also flags secrets) is **auto-held in a temporary database**
+until your next scan; you can then **save it
 long-term** - tick which projects to keep, and they're **merged** into the database (it accumulates
 across scans and keeps projects nested inside one another consistent). Once scanned, the rest opens
 up: **explore this scan** (list/search projects,
@@ -127,11 +136,13 @@ up the web dashboard in the background (best-effort) so both are usable at once.
 python utils/web/app.py        # -> http://127.0.0.1:5000
 ```
 
-Six views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
-space), **Projects** (filter + in-page recategorise), **Cleanup** (ranked cleanup suggestions),
-**Overlap** (shared dependencies + the space a shared/hardlinked package store could reclaim + a
-version-conflict / shareable-venv check), **Storage** (largest projects / files / directories), and
-**Security** (masked secret findings + dependency vulnerabilities). The web dashboard and the advisory
+Seven views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
+space), **Projects** (filter + in-page recategorise, now with a per-project git badge), **Cleanup**
+(ranked cleanup suggestions), **Overlap** (shared dependencies + the space a shared/hardlinked package
+store could reclaim + a version-conflict / shareable-venv check), **Storage** (largest projects / files
+/ directories), **Security** (masked secret findings + dependency vulnerabilities + `.env` / ignore
+hygiene), and **Git** (at-risk projects - uncommitted / unpushed / stale - plus repos worth a
+`git gc`). The web dashboard and the advisory
 Cleanup view never delete anything - they only suggest. The one place deletion happens is the opt-in
 **Reclaimer** in the CLI, which shows a full plan and requires a typed confirmation first.
 
@@ -181,6 +192,22 @@ milestones (its "v0.5" and "v0.6" feature buckets both ship inside release v0.4)
 
 ---
 
+## Branches
+
+* **`main`** - the stable, public branch. Its interactive CLI is the streamlined
+  scan -> explore -> save flow (no developer debug/checks menu), and the test suite is not tracked.
+* **`nightly`** - the development branch. It tracks the full test suite under `utils/tests/`
+  (`test_suite.py`, `test_db_manager.py`, `test_web.py` - 169 tests across the scanner, database, and
+  web layers) and keeps the CLI's debug/checks submenu, so it's the branch to run the tests and hack on.
+
+Run the tests (on `nightly`) from the repo root with:
+
+```bash
+python -m unittest discover -s utils/tests
+```
+
+---
+
 ## Goals
 
 MnemoCetus aims to become a developer workspace assistant that:
@@ -195,4 +222,5 @@ MnemoCetus aims to become a developer workspace assistant that:
 ## LICENSE
 
 I am an (self-proclaimed) intermediate student developer looking to further their skills with this project. Feel free to use my code however you would like!
+However, please link back to this repository or credit me.
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

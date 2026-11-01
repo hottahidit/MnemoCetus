@@ -6,9 +6,33 @@
 import os
 import sys
 import shutil
+import re
 import subprocess
 
 from cleaner import RECLAIMABLE_MARKERS  # the curated set of dir names we are ever willing to delete
+
+# Marker names that are ALSO common names for real, hand-written content (a committed dist/ for a GitHub
+# Action, electron-builder's build/ icons, a Maven-less target/ folder ...). These are only treated as
+# regenerable when a sibling file proves which tool produces them.
+_AMBIGUOUS_MARKERS = {
+    "target": ("Cargo.toml", "pom.xml", "build.sbt", "build.gradle", "build.gradle.kts", "project.clj"),
+    "vendor": ("go.mod", "composer.json", "Gemfile"),
+    "dist":   ("package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "vite.config.js",
+               "vite.config.ts", "webpack.config.js", "rollup.config.js", "tsconfig.json"),
+    "build":  ("package.json", "pyproject.toml", "setup.py", "setup.cfg", "CMakeLists.txt", "Makefile",
+               "meson.build", "build.gradle", "build.gradle.kts", "pubspec.yaml"),
+}
+
+
+_PEP508_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+
+def _contains_git_repo(path):
+    """True if a .git (dir or worktree file) lives anywhere under 'path' -> e.g. an edited clone in vendor/."""
+    for root, dirs, files in os.walk(path):  # os.walk does not follow symlinked dirs by default
+        if ".git" in dirs or ".git" in files:
+            return True
+    return False
 
 
 def _safe_to_delete(path, workspace_root):
@@ -37,6 +61,20 @@ def _safe_to_delete(path, workspace_root):
         return False, "is the workspace root itself (refusing to delete it)"
     if not real.startswith(root + os.sep):
         return False, "resolves outside the scanned workspace"
+    # The NAME says "bloat"; now check the CONTENTS agree before an irreversible rmtree.
+    name = os.path.basename(real)
+    needs = _AMBIGUOUS_MARKERS.get(name)
+    if needs and not any(os.path.exists(os.path.join(os.path.dirname(real), f)) for f in needs):
+        return False, f"'{name}/' has no build manifest beside it (may be hand-written content)"
+    import gitinfo  # local import -> the git layer stays optional
+    if gitinfo.git_available():
+        tracked = gitinfo.tracked_files_under(real)
+        if tracked:
+            return False, f"git tracks {tracked} file(s) in it (committed content, not regenerable bloat)"
+        if tracked is None and gitinfo._git(["rev-parse", "--is-inside-work-tree"], os.path.dirname(real)) == "true":
+            return False, "inside a git repo but its tracked files couldn't be checked (git failed / timed out)"
+    if _contains_git_repo(real):
+        return False, "contains a nested git repository (local commits could be lost)"
     return True, ""
 
 
@@ -90,21 +128,27 @@ def create_uni_venv(venv_path, dependencies=()):
     except (OSError, subprocess.SubprocessError) as e:
         return {"created": False, "path": venv_path, "installed": 0, "failed": [], "error": str(e)}
 
-    deps = sorted({d for d in dependencies if d and d.lower() != "python"})
+    # Dep names come from scanned (untrusted) manifests -> only pass valid PEP 508 project names to pip, so a
+    # line like '-i https://evil/simple' or 'git+https://...' can never become a pip option or source.
+    names = {d.strip() for d in dependencies if d and d.strip().lower() != "python"}
+    deps = sorted(d for d in names if _PEP508_NAME.match(d))
+    rejected = sorted(names - set(deps))
     if not deps:
-        return {"created": True, "path": venv_path, "installed": 0, "failed": [], "error": None}
+        return {"created": True, "path": venv_path, "installed": 0, "failed": rejected,
+                "error": "skipped invalid package names" if rejected else None}
 
     pip = os.path.join(venv_path, "bin", "pip")
     if not os.path.exists(pip):  # Windows layout
         pip = os.path.join(venv_path, "Scripts", "pip.exe")
     try:
-        proc = subprocess.run([pip, "install", *deps], capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run([pip, "install", "--", *deps], capture_output=True, text=True, timeout=1800)
     except (OSError, subprocess.SubprocessError) as e:
         return {"created": True, "path": venv_path, "installed": 0, "failed": deps, "error": str(e)}
     if proc.returncode == 0:
-        return {"created": True, "path": venv_path, "installed": len(deps), "failed": [], "error": None}
+        return {"created": True, "path": venv_path, "installed": len(deps), "failed": rejected,
+                "error": f"skipped invalid package names: {', '.join(rejected)}" if rejected else None}
     # pip resolves the whole set at once, so a conflict fails the batch -> report it, the venv still exists.
-    return {"created": True, "path": venv_path, "installed": 0, "failed": deps, "error": (proc.stderr or "").strip()[-500:]}
+    return {"created": True, "path": venv_path, "installed": 0, "failed": deps + rejected, "error": (proc.stderr or "").strip()[-500:]}
 
 
 def run_git_gc(repo_paths, aggressive=False):
@@ -115,13 +159,14 @@ def run_git_gc(repo_paths, aggressive=False):
 
     Returns {ran: [path,...], freed_bytes: int, failed: [(path, msg),...]}.
     """
-    from gitinfo import git_dir_size  # local import -> git layer stays optional
-    cmd = ["git", "gc"] + (["--prune=now"] if aggressive else [])
+    from gitinfo import git_dir_size, git_command, git_env  # local import -> git layer stays optional
+    cmd = git_command(["gc"] + (["--prune=now"] if aggressive else []))
     ran, failed, freed = [], [], 0
     for path in repo_paths:
         before = git_dir_size(path)
         try:
-            proc = subprocess.run(cmd, cwd=path, capture_output=True, text=True, timeout=600)
+            proc = subprocess.run(cmd, cwd=path, capture_output=True, text=True, timeout=600,
+                                  stdin=subprocess.DEVNULL, env=git_env())
         except (OSError, subprocess.SubprocessError) as e:
             failed.append((path, str(e)))
             continue

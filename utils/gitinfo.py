@@ -17,10 +17,29 @@ _TIMEOUT = 10
 STALE_DAYS = 180  # default "unused" threshold: no commit in this many days
 
 
+# We run git inside EVERY scanned project, and a project's own .git/config is untrusted input (a repo
+# unpacked from a zip/tarball can carry anything). Config keys like core.fsmonitor make git EXECUTE a
+# command on `git status`, so neutralise them on every call. GIT_OPTIONAL_LOCKS=0 stops read-only commands
+# (status) from taking .git/index.lock and colliding with the user's own git work; stdin is closed so a
+# credential / editor prompt can never hang a scan worker.
+GIT_SAFE_ARGS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
+def git_command(args):
+    """The full argv for a hardened `git <args>` call (shared by every module that shells out to git)."""
+    return ["git", *GIT_SAFE_ARGS, *args]
+
+
+def git_env():
+    """Environment for a hardened git call: no optional locks, never prompt."""
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
+
+
 def _git(args, cwd, timeout=_TIMEOUT):
     """Run `git <args>` in cwd -> stripped stdout, or None on any failure (git missing / not a repo / non-zero)."""
     try:
-        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(git_command(args), cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -135,6 +154,20 @@ def is_archivable(info, days=STALE_DAYS, now=None):
         and not info.get("dirty") and info.get("untracked", 0) == 0
         and info.get("ahead", 0) == 0 and is_stale(info, days=days, now=now)
     )
+
+
+def tracked_files_under(path):
+    """
+    How many files git TRACKS under directory 'path' -> 0 for none, None when that can't be determined
+    (not inside a work tree, git missing, or git failed / timed out). Used to refuse deleting a "bloat"
+    directory that is actually committed content (a checked-in dist/, a vendored vendor/ ...).
+    """
+    if _git(["rev-parse", "--is-inside-work-tree"], path) != "true":
+        return None
+    out = _git(["ls-files", "-z", "--", "."], path)
+    if out is None:
+        return None
+    return len([f for f in out.split("\0") if f])
 
 
 def is_ignored(repo_dir, relpath):

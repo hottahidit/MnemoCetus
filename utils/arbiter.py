@@ -54,8 +54,10 @@ _TIMEOUT = 30  # seconds; the arbiter is a small single call, so a short ceiling
 # --------------------------------------------------------------------------- #
 def is_local(base_url):
     """True if base_url points at this machine / a private network -> such endpoints get un-redacted facts."""
-    host = (urlparse(base_url).hostname or "").lower()
-    if not host or host in ("localhost", "0.0.0.0") or host.endswith(".local"):
+    host = (urlparse(base_url or "").hostname or "").lower()
+    if not host:
+        return False  # unknown endpoint -> fail closed (redact), never assume it's local
+    if host in ("localhost", "0.0.0.0") or host.endswith(".local"):
         return True
     try:
         return ipaddress.ip_address(host).is_private or ipaddress.ip_address(host).is_loopback
@@ -260,13 +262,13 @@ class GeminiProvider(ArbiterProvider):
     def classify(self, facts):
         if not self.api_key:
             return None
-        url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.base_url}/models/{self.model}:generateContent"  # key goes in a header, never the URL (logs / proxies)
         payload = {
             "contents": [{"parts": [{"text": _SYSTEM_PROMPT + "\n\n" + json.dumps(facts)}]}],
             "generationConfig": {"temperature": 0},
         }
         try:
-            data = _post_json(url, payload)
+            data = _post_json(url, payload, {"x-goog-api-key": self.api_key})
             return _normalise(data["candidates"][0]["content"]["parts"][0]["text"])
         except (urllib.error.URLError, OSError, KeyError, IndexError, TypeError, ValueError):
             return None
@@ -304,5 +306,6 @@ def classify_project(project, arbiter_cfg, workspace_root=None):
     provider = get_provider(arbiter_cfg)
     if isinstance(provider, NoneProvider):
         return None
-    redact = not is_local(arbiter_cfg.get("base_url") or "")
+    # Decide redaction from the URL we will ACTUALLY call (the preset fallback included), not the raw setting.
+    redact = not is_local(getattr(provider, "base_url", ""))
     return provider.classify(build_facts(project, workspace_root, redact))

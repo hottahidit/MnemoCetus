@@ -1,19 +1,24 @@
 # Flask web app for MnemoCetus (v0.4 - the browser front-end over the "MnemoIndex" store and "MnemoClean" cleanup).
 #
-# Six views:
+# Seven views:
 #   /          -> statistics dashboard (totals, by-language / by-category, confidence spread, reclaimable space)
 #   /projects  -> filterable database viewer with recategorisation, which POSTs into db_manager.set_override / approve / clear_override / delete_project.
 #   /cleanup   -> reclaimable-space cleanup recommendations (advisory only; never deletes anything).
 #   /overlap   -> cross-project dependency overlap + rough env savings, and the version-conflict / shareable-venv check.
 #   /storage   -> storage analysis (largest projects / files / directories + workspace rollup).
-#   /security  -> MnemoScan findings: hard-coded secrets (masked) and optional dependency vulnerabilities.
+#   /security  -> MnemoScan findings: hard-coded secrets (masked), optional dependency vulnerabilities, .env / ignore hygiene.
+#   /git       -> git workspace: at-risk projects (uncommitted / unpushed / stale) + repos worth a `git gc`.
 #
-# NOTE: this is a local, single-user tool, so the mutating POST routes don't carry CSRF tokens.
+# SECURITY: this is a local, single-user tool, but a browser will still talk to it on behalf of ANY website.
+# So every request must carry a local Host header (blocks DNS rebinding -> a remote page reading /export),
+# every POST must come from our own origin (blocks cross-site form posts to /projects/delete etc.), and the
+# post-action redirect only follows same-site paths (no open redirect). See _guard_request below.
 
 import os
 import sys
 
-from flask import Flask, render_template, request, redirect, url_for, Response
+from flask import Flask, render_template, request, redirect, url_for, Response, abort
+from urllib.parse import urlsplit
 
 # Make the sibling modules (db_manager) importable whether it's run as a script or imported.
 UTILS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +28,8 @@ if UTILS_DIR not in sys.path:
 from db_tools import manager as db_manager  # noqa: E402
 import report  # noqa: E402
 import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
+import gitinfo  # noqa: E402  (per-project git badge)
+import insight  # noqa: E402  (at-risk projects + git-gc recommendations)
 
 # The categories offered in the recategorise dropdown (mirrors the CLI review choices).
 CATEGORIES = ["backend", "frontend", "full stack", "automation", "library", "cli", "desktop", "application", "data/ml", "other"]
@@ -82,6 +89,16 @@ def _security(db_path):
     with utils.open_db(db_path) as db:
         return db.security_summary()
 
+def _git_overview(db_path):
+    """Workspace git rollup: projects at risk (uncommitted/unpushed/stale) + repos worth `git gc`."""
+    if not os.path.exists(db_path):
+        return None
+    with utils.open_db(db_path) as db:
+        return {
+            "at_risk": insight.at_risk_projects(db),
+            "gc": insight.git_gc_recommendations(db),
+        }
+
 def _project_detail(db_path, path):
     """Everything about one project (deps + marks + security findings), or None if it isn't in the db."""
     if not os.path.exists(db_path):
@@ -140,14 +157,48 @@ def _filter_projects(projects, language, category, framework, query, only_uncert
         out.append(p)
     return out
 
+# Hostnames the dashboard answers to. It binds 127.0.0.1, so anything else in Host is a rebinding attempt.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _hostname(netloc):
+    """'host:port' / '[::1]:port' -> lowercase hostname ('' if unparseable)."""
+    try:
+        return (urlsplit("//" + (netloc or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _safe_next(target):
+    """Only follow same-site relative paths ('/projects?...'); reject absolute / scheme-relative URLs."""
+    if not target or not target.startswith("/") or target.startswith("//") or "\\" in target:
+        return None
+    return target
+
+
 def create_app(db_path=None):
     """Flask app factory -> keeps things testable and lets us point at any .db file."""
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path or db_manager.DEFAULT_DB_PATH
     app.jinja_env.filters["humansize"] = utils.human_size
+    app.jinja_env.filters["gitbadge"] = gitinfo.badge_from_row
+
+    app.config.setdefault("ALLOWED_HOSTS", set(LOCAL_HOSTS))
 
     def current_db():
         return app.config["DB_PATH"]
+
+    @app.before_request
+    def _guard_request():
+        allowed = app.config["ALLOWED_HOSTS"]
+        if _hostname(request.host) not in allowed:
+            abort(403)  # DNS rebinding: a foreign hostname resolving to 127.0.0.1
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            # Browsers send Origin on cross-site form POSTs (Referer as a fallback). No header at all ->
+            # a non-browser client (curl / tests), which can't be driven by a malicious page.
+            source = request.headers.get("Origin") or request.headers.get("Referer")
+            if source is not None and _hostname(urlsplit(source).netloc) not in allowed:
+                abort(403)
 
     @app.route("/")
     def index():
@@ -229,6 +280,14 @@ def create_app(db_path=None):
             summary=_security(current_db()),
         )
 
+    @app.route("/git")
+    def git_view():
+        return render_template(
+            "git.html",
+            db_path=os.path.normpath(current_db()),
+            overview=_git_overview(current_db()),
+        )
+
     @app.route("/export")
     def export_view():
         # ?format=md (default) or json -> download the whole workspace report as one file.
@@ -256,7 +315,7 @@ def create_app(db_path=None):
 
     # --- mutations: POST then redirect back (preserving the current filters) -------- #
     def back():
-        return redirect(request.form.get("next") or url_for("projects_view"))
+        return redirect(_safe_next(request.form.get("next")) or url_for("projects_view"))
 
     def with_db(action):
         if os.path.exists(current_db()):
@@ -291,4 +350,5 @@ def create_app(db_path=None):
 
 if __name__ == "__main__":
     # Dev server: 'python utils/web/app.py' -> http://127.0.0.1:5000
-    create_app().run(debug=True)
+    # Never debug=True -> the Werkzeug debugger is a remote-code-execution console.
+    create_app().run(host="127.0.0.1")
