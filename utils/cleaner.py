@@ -42,7 +42,7 @@ def _dir_size(path):
                 continue
     return total_bytes, total_files
 
-def _collect_marks(directory, name_rules, path_rules):
+def _collect_marks(directory, name_rules, path_rules, skip=()):
     """
     Walk the given 'directory' and flag every regenerable/bloat subtree (as seen in RECLAIMABLE_MARKERS) that the normal scan filters out, additionally sizing each one so we can tell the user how much disk is reclaimable.
 
@@ -53,15 +53,20 @@ def _collect_marks(directory, name_rules, path_rules):
         directory (str): the project dir to inspect.
         name_rules (set): compiled basename exclude rules (to skip non-reclaimable excluded dirs).
         path_rules (set): compiled path exclude rules.
+        skip (iterable): directories NOT to descend into -> the nested child projects, which collect
+            their own marks (otherwise a parent re-counts every child's node_modules / venv).
 
     Returns:
         list[dict]: one {kind, name, path, size_bytes, file_count, reason} per reclaimable dir found.
     """
+    skip = {os.path.normpath(p) for p in skip}
     marks = []
     for root, dirs, files in os.walk(directory):
         keep = []
         for d in dirs:
             full = os.path.join(root, d)
+            if skip and os.path.normpath(full) in skip:
+                continue  # a nested project -> it reports its own marks
             marker = RECLAIMABLE_MARKERS.get(d)
             if marker:
                 kind, reason = marker

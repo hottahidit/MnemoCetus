@@ -331,6 +331,7 @@ def create_app(db_path=None):
             language=request.form.get("language") or None,
             category=request.form.get("category") or None,
             note=request.form.get("note") or None,
+            partial=True,  # blank inputs mean "leave as is", not "erase the earlier override"
         ))
 
     @app.route("/projects/approve", methods=["POST"])

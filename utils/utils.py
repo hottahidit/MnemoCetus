@@ -4,12 +4,30 @@
 #   human_size              -> byte count to a readable string
 #   confidence_band /       -> which recognition-confidence band a 0-1 score falls in, and a fresh
 #   empty_confidence_counts    {band: 0} tally, so every caller buckets confidence identically
+#   safe_print              -> rich's print, but a stray '[' in a path / finding / AI reply can't crash it
 #
 # This is the one home for these -> scanner / report / web all import them from here rather than
 # repeating them. db_manager is imported lazily inside open_db so importing this module stays cheap
 # (the scan engine can pull human_size without dragging in the database layer).
 
 from contextlib import contextmanager
+
+
+def safe_print(*objects, **kwargs):
+    """
+    rich.print, hardened for untrusted text. Paths, scanned file contents and LLM replies get interpolated
+    into rich markup all over the CLI, and a directory named e.g. 'a[/]b' raises MarkupError mid-flow
+    (killing a browse / review / reclaim plan, or a whole scan). On a markup error the same objects are
+    re-printed with markup OFF -> plain but complete output, never a crash. Strings that are meant to be
+    styled should still escape() their untrusted parts so the styling survives.
+    """
+    from rich import print as _rich_print   # lazy -> `import utils` stays cheap for the web layer
+    from rich.errors import MarkupError
+    try:
+        _rich_print(*objects, **kwargs)
+    except MarkupError:
+        from rich.console import Console
+        Console(markup=False).print(*objects, **{k: v for k, v in kwargs.items() if k in ("sep", "end")})
 
 
 @contextmanager

@@ -4,7 +4,7 @@
 
   <h2>Git workspace</h2>
   <p class="muted">Per-project git state captured during the last scan. <strong>At-risk</strong> flags local
-     work that could be lost (uncommitted / unpushed / stale); <strong>gc candidates</strong> are repos whose
+     work that could be lost (uncommitted / unpushed / stale, or <em>unverified</em> when git couldn't be read); <strong>gc candidates</strong> are repos whose
      <code>.git</code> object store is worth compacting. Detection only &mdash; run a <code>git gc</code> or the
      Reclaimer from the CLI to act. Exposed-<code>.env</code> and un-ignored-bloat findings live under
      <a href="{{ url_for('security_view') }}">Security</a>.</p>
@@ -21,9 +21,10 @@
         <tr><th>project</th><th>language</th><th>risks</th></tr>
         {% for p in overview.at_risk %}
           <tr>
-            <td><a href="{{ url_for('project_view', path=p.path) }}"><code>{{ p.path }}</code></a></td>
+            <td><a href="{{ url_for('project_view', path=p.path) }}"><code>{{ p.path }}</code></a>
+              {% if p.projects and p.projects > 1 %}<span class="muted">(repo shared by {{ p.projects }} projects)</span>{% endif %}</td>
             <td>{{ p.language or '&mdash;' | safe }}</td>
-            <td>{% for r in p.risks %}<span class="badge {{ 'high' if r == 'uncommitted' else 'medium' if r == 'unpushed' else 'low' }}">{{ r }}</span> {% endfor %}</td>
+            <td>{% for r in p.risks %}<span class="badge {{ 'high' if r in ('uncommitted', 'unverified') else 'medium' if r == 'unpushed' else 'low' }}"{% if r == 'unverified' %} title="git status failed or timed out during the scan -> uncommitted work can't be ruled out"{% endif %}>{{ r }}</span> {% endfor %}</td>
           </tr>
         {% endfor %}
       </table>

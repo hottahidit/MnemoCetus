@@ -63,15 +63,34 @@ def git_gc_recommendations(db, min_bytes=50 * 1024 * 1024):
     """
     import gitinfo
     items = []
-    for p in db.all_projects():
-        if not (p.get("git_head") or p.get("git_branch")):
-            continue  # not a git repo
+    for p in _one_per_repo(db.all_projects()):  # nested projects share ONE .git -> measure (and count) it once
         size = gitinfo.git_dir_size(p["path"])
         if size and size["reclaimable_estimate"] >= min_bytes:
             items.append({"path": p["path"], "reclaimable": size["reclaimable_estimate"],
                           "total": size["total_bytes"]})
     items.sort(key=lambda it: it["reclaimable"], reverse=True)
     return {"items": items, "total_reclaimable": sum(it["reclaimable"] for it in items)}
+
+
+def _one_per_repo(projects):
+    """
+    Collapse projects to one representative per git repository. Several scanned projects can live in the
+    same repo (a monorepo's backend/ + frontend/), and dirty / ahead / last-commit / .git size are all
+    REPO-wide facts -> without this, one repo is listed (and its gc estimate summed) once per sub-project.
+    The representative is the shallowest project path; it carries 'projects' = how many it stands for.
+    Rows without a stored git_root (DBs from before schema v8) fall back to their own path.
+    """
+    groups = {}
+    for p in projects:
+        if not (p.get("git_head") or p.get("git_branch")):
+            continue  # not a git repo
+        groups.setdefault(p.get("git_root") or p["path"], []).append(p)
+    out = []
+    for members in groups.values():
+        rep_ = min(members, key=lambda m: (len(m["path"]), m["path"]))
+        out.append({**rep_, "projects": len(members)})
+    out.sort(key=lambda m: m["path"])
+    return out
 
 
 def at_risk_projects(db, stale_days=STALE_DAYS, now=None):
@@ -82,11 +101,11 @@ def at_risk_projects(db, stale_days=STALE_DAYS, now=None):
     """
     now = time.time() if now is None else now
     out = []
-    for p in db.all_projects():
-        if not (p.get("git_head") or p.get("git_branch")):
-            continue  # not a git repo -> no git-shaped risk to report
+    for p in _one_per_repo(db.all_projects()):  # one row per repo, not per nested project
         risks = []
-        if p.get("git_dirty"):
+        if p.get("git_dirty") is None:
+            risks.append("unverified")  # git status failed / timed out at scan time -> can't prove it's clean
+        elif p.get("git_dirty"):
             risks.append("uncommitted")
         if (p.get("git_ahead") or 0) > 0:
             risks.append("unpushed")
@@ -94,5 +113,6 @@ def at_risk_projects(db, stale_days=STALE_DAYS, now=None):
         if last and (now - last) > stale_days * 86400:
             risks.append("stale")
         if risks:
-            out.append({"path": p["path"], "language": p.get("language"), "risks": risks})
+            out.append({"path": p["path"], "language": p.get("language"), "risks": risks,
+                        "projects": p["projects"]})
     return out

@@ -14,6 +14,7 @@ import time
 import subprocess
 
 _TIMEOUT = 10
+_STATUS_TIMEOUT = 60  # `git status` walks the whole work tree -> slow on huge repos / WSL's /mnt/c
 STALE_DAYS = 180  # default "unused" threshold: no commit in this many days
 
 
@@ -75,11 +76,17 @@ def status(path):
     info["detached"] = branch == "HEAD"
     info["branch"] = None if branch in (None, "HEAD") else branch
 
-    porcelain = _git(["status", "--porcelain"], path)
-    lines = porcelain.splitlines() if porcelain else []
-    info["untracked"] = sum(1 for ln in lines if ln.startswith("??"))
-    info["modified"] = len(lines) - info["untracked"]
-    info["dirty"] = bool(lines)
+    porcelain = _git(["status", "--porcelain"], path, timeout=_STATUS_TIMEOUT)
+    if porcelain is None:
+        # git failed or timed out -> the state is UNKNOWN. Never report that as clean: a clean verdict
+        # lets an incremental scan reuse stale results and hides uncommitted work from the at-risk view.
+        info["untracked"] = info["modified"] = 0
+        info["dirty"] = None
+    else:
+        lines = porcelain.splitlines()
+        info["untracked"] = sum(1 for ln in lines if ln.startswith("??"))
+        info["modified"] = len(lines) - info["untracked"]
+        info["dirty"] = bool(lines)
 
     info["has_remote"] = bool(_git(["remote"], path))
 
@@ -102,19 +109,25 @@ def change_key(info):
     """A cheap fingerprint of a repo's state for change detection -> (head, dirty), or None for a non-repo."""
     if not info.get("is_repo"):
         return None
-    return (info.get("head"), bool(info.get("dirty")))
+    dirty = info.get("dirty")
+    return (info.get("head"), None if dirty is None else bool(dirty))
 
 
 def change_signature(head, dirty, content_mtime):
     """
     A stable per-project signature for incremental scans. None means "always re-scan":
-      - a CLEAN git repo -> pinned to its HEAD commit (rock-solid unchanged signal)
-      - a non-repo folder -> its newest file mtime
-      - a DIRTY repo or an unknown state -> None (never skip; we can't cheaply prove it's unchanged)
+      - a CLEAN git repo -> its HEAD commit PLUS the newest mtime. HEAD alone isn't enough: `git status`
+        ignores gitignored files, so a new secret in an ignored .env (or new ignored bloat) would never
+        change it. content_mtime covers hidden files and directory mtimes too (see persist_scan), so
+        additions AND deletions anywhere in the scanned tree show up.
+      - a non-repo folder -> its newest mtime (same coverage)
+      - a DIRTY repo or an UNKNOWN state (dirty is None: git failed / timed out) -> None (never skip)
     Works identically on live gitinfo.status() and on a stored DB row, so the two can be compared.
     """
+    if dirty is None and head:
+        return None  # couldn't verify the work tree -> never trust it as unchanged
     if head and not dirty:
-        return ("git", head)
+        return ("git", head, round(content_mtime, 2) if content_mtime else None)
     if not head and content_mtime:
         return ("mtime", round(content_mtime, 2))
     return None
@@ -134,7 +147,9 @@ def at_risk(info):
     if not info.get("is_repo"):
         return []
     risks = []
-    if info.get("dirty"):
+    if info.get("dirty") is None:
+        risks.append("unverified")              # git status failed / timed out -> can't prove it's clean
+    elif info.get("dirty"):
         risks.append("uncommitted")
     if not info.get("has_remote"):
         risks.append("no-remote")               # never backed up anywhere
@@ -151,7 +166,7 @@ def is_archivable(info, days=STALE_DAYS, now=None):
     """
     return bool(
         info.get("is_repo") and info.get("has_remote") and info.get("has_upstream")
-        and not info.get("dirty") and info.get("untracked", 0) == 0
+        and info.get("dirty") is False and info.get("untracked", 0) == 0
         and info.get("ahead", 0) == 0 and is_stale(info, days=days, now=now)
     )
 
@@ -209,7 +224,8 @@ def badge_from_row(row):
     if not (row.get("git_branch") or row.get("git_head")):
         return ""
     name = row.get("git_branch") or (row.get("git_head") or "")[:7]
-    parts = [f"⎇ {name}", "●" if row.get("git_dirty") else "✓"]
+    dirty = row.get("git_dirty")
+    parts = [f"⎇ {name}", "?" if dirty is None else ("●" if dirty else "✓")]  # '?' = state unknown
     if row.get("git_ahead") or 0:
         parts.append(f"↑{row['git_ahead']}")
     return " ".join(parts)
@@ -221,7 +237,9 @@ def badge(info):
         return ""
     name = info.get("branch") or ((info.get("head") or "")[:7] or "?")
     parts = [f"⎇ {name}"]
-    if info.get("dirty"):
+    if info.get("dirty") is None:
+        parts.append("?")  # git status failed / timed out -> state unknown
+    elif info.get("dirty"):
         parts.append(f"●{info.get('modified', 0) + info.get('untracked', 0)}")
     else:
         parts.append("✓")

@@ -21,12 +21,24 @@ _qstyle = questionary.Style([
 def ask_dir(msg="Enter a directory:"):
     return questionary.path(msg, style=_qstyle).ask()
 
+# questionary can only assign hotkeys to this many choices (0-9 + a-z) and raises ValueError beyond it.
+_MAX_SHORTCUTS = 36
+
+
 def _menu(message, choices, **kwargs):
-    """Every menu routes through here -> the shared theme, a '▸' pointer, and number/letter hotkeys."""
-    return questionary.select(
-        message, choices=choices, style=_qstyle, pointer="▸",
-        use_shortcuts=True, **kwargs,
-    ).ask()
+    """
+    Every menu routes through here -> the shared theme, a '▸' pointer, and number/letter hotkeys.
+
+    Long lists (e.g. an OpenRouter / Ollama model list with hundreds of entries) can't all get hotkeys,
+    so past _MAX_SHORTCUTS they switch to type-to-filter instead of crashing.
+    """
+    if len(choices) <= _MAX_SHORTCUTS:
+        nav = {"use_shortcuts": True}
+    else:
+        nav = {"use_shortcuts": False, "use_search_filter": True, "use_jk_keys": False,
+               "instruction": "(type to filter, arrows to move)"}
+    nav.update(kwargs)
+    return questionary.select(message, choices=choices, style=_qstyle, pointer="▸", **nav).ask()
 
 def ask_mode():
     """Relationship-mode picker: shows a description on highlight, with the recommended default marked."""
