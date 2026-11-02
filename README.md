@@ -29,148 +29,204 @@ MnemoCetus is a portmanteau of the name of the Greek Goddess Mnemosyne (for memo
 
 ## Features
 
-Working today:
+**Find and understand your projects**
 
-* Scan directories recursively for programming projects, filtering out junk (node_modules, venv, ...)
-* Detect project language, frameworks and type (backend / frontend / full stack / cli / library / ...)
-  for Python, JavaScript/TypeScript, Rust and Go via marker files + declared dependencies
-* Weighted **confidence score** and a composition **breakdown** per project, so a mostly-HTML repo
-  with one small Flask file isn't mislabelled "backend" (it's promoted to "full stack")
-* Store everything in a local SQLite database (scans, projects, dependencies, files, marks)
-* **Review low-confidence projects** and set a **user override** for what a project really is;
-  overrides survive re-scans
-* Flag **reclaimable space** ("marks") - regenerable bloat like node_modules / venv / build output -
-  and generate **safe, non-destructive cleanup recommendations** with potential savings
-* **Reclaimer** (opt-in, the one action that changes your disk) - actually delete selected bloat
-  (venvs / caches / build output / node_modules) and optionally build one shared **uni-venv**, after a
-  dry-run plan and a typed confirmation. It is guarded to only ever touch curated bloat directories
-  inside the scanned workspace, and never follows symlinks
-* **Storage analysis** - workspace size rollup plus the largest projects / files / directories,
-  backed by a persisted per-project file inventory
-* **Cross-project dependency intelligence** - the shared packages across your projects, a rough
-  estimate of the space a shared/hardlinked package store (uv, pnpm) could reclaim, and a
-  version-conflict check flagging which projects could share one virtualenv vs. which clash on pins
-* **Security scan** ("MnemoScan") - flag hard-coded secrets (API keys, tokens, private keys; values
-  are masked, never stored raw) during a scan, plus an optional dependency-vulnerability audit that
-  shells out to pip-audit / npm audit when they're installed, an optional **full git-history secret
-  scan** (catches secrets that were committed and later "removed" - they live on in history), and
-  `.env` / un-ignored-bloat hygiene checks for git repos
-* A **web dashboard** (Flask): workspace statistics, a filterable database viewer with in-page
-  recategorisation, cleanup recommendations, dependency overlap, storage analysis, and security findings
+* Recursively scans a workspace for projects - Python, JavaScript/TypeScript, Rust and Go - via marker
+  files and declared dependencies, filtering out junk (node_modules, venv, build output, ...)
+* Detects language, frameworks and type (backend / frontend / full stack / cli / library / ...) with a
+  weighted **confidence score** and a composition **breakdown**, so a mostly-HTML repo with one small
+  Flask file isn't mislabelled "backend"
+* **Low-confidence review** with **user overrides** that survive re-scans, plus an optional local-first
+  **AI arbiter** (Ollama by default; OpenAI-compatible, Anthropic and Gemini supported) for a second
+  opinion on borderline projects - cloud endpoints only ever see redacted, workspace-relative paths
+* **Git awareness** - branch, uncommitted / unpushed / stale work, repos worth a `git gc`
 
-Planned:
+**Keep it clean**
 
-* **Git-aware workspace** (v0.9) - per-project git status (branch / clean-dirty / ahead-behind / stale),
-  git-powered change detection ("what changed since last scan"), plus `.git` bloat and `.env` / ignore
-  hygiene checks
-* **Archive & reclaim** - recommend pushing stale repositories to a private remote, then (safely, only once
-  everything is backed up) removing them locally to free space while preserving the project
-* **Shell companion** (v1.0) - an installed `mnemc` subcommand CLI, a git-style shell-prompt status light
-  (green = up to date / amber = changes / red = vulnerabilities), and the web dashboard as a report surface
-* Deeper security scanning (more secret detectors, richer audit integration)
+* **Reclaimable space** - sizes regenerable bloat (node_modules, venvs, caches, build output) honestly:
+  symlinks are never followed and pnpm-style hard links aren't counted as freeable
+* **Cleanup recommendations** and the opt-in **Reclaimer**, the one feature that deletes: a dry-run plan,
+  a typed confirmation, and a guard that refuses anything outside the scanned workspace, anything git
+  tracks, anything containing a nested repo, and ambiguous folders (`dist/`, `build/`, `target/`,
+  `vendor/`) without a matching build file beside them
+* **Storage analysis** (largest projects / files / folders) and **dependency intelligence** (shared
+  packages, version conflicts, which projects could share one virtualenv)
 
----
+**Keep it secure** ("MnemoScan")
 
-## Current Status
+* Hard-coded secrets (API keys, tokens, private keys) found during every scan - **masked**, never stored raw
+* Optional **full git-history** secret scan, `.env` exposure and un-ignored-bloat hygiene checks, and an
+  optional dependency-vulnerability audit via `pip-audit` / `npm audit` when installed
 
-DISCLAIMER: I may forget to update this information with each update, so double-check it if needed.
+**Know what changed**
 
-Active development, at **v0.8**. Since the v0.5 line (dependency intelligence + the **MnemoScan** security
-layer) and the v0.6 UI overhaul: report export; an opt-in **AI arbiter** for low-confidence projects
-(local-first, Ollama by default); a **parallelised scanner** with auto-tuning + a progress bar; and a
-package tidy-up (`cli.py` is now the entry point at the repo root, with the engine modules under `utils/`).
-**v0.9 - the git-aware workspace** - is in progress. See the roadmap.
+* **Incremental scans** - unchanged projects reuse their stored results
+* **"What changed since last save"** - new / removed / changed projects, **new security findings** and new
+  bloat, in the terminal, the web dashboard and the export report
+* A **shell-prompt status light**: a coloured dot when you're inside a scanned project
+
+**Three ways in**
+
+* `nemc` - scriptable subcommands (every read command speaks `--json`) plus an interactive menu
+* A local **web dashboard** - statistics, a filterable project database with in-page recategorisation,
+  cleanup, overlap, storage, security, git and changes views
+* **Markdown / JSON report export** of the whole workspace
 
 ---
 
 ## Installation
 
-Clone the repository:
+Requires Python 3.9+ (3.11+ for `pyproject.toml` / `Cargo.toml` parsing).
 
 ```bash
 git clone https://github.com/hottahidit/mnemocetus.git
 cd mnemocetus
+pipx install .          # recommended: puts the `nemc` command on your PATH, isolated
+# or, to hack on it (edits take effect immediately):
+pip install -e .
 ```
 
-Install the dependencies (the CLI uses `rich` + `questionary`; the optional web dashboard adds `flask`):
+On a system Python that refuses `pip install` ("externally-managed-environment", PEP 668) use `pipx` or a
+virtualenv. To run from a checkout without installing: `pip install -r requirements.txt`, then
+`python cli.py` (same as `nemc`).
+
+Then add the status light + tab-completion to your shell (one line, see [Shell integration](#shell-integration)):
 
 ```bash
-pip install -r requirements.txt
+echo 'eval "$(nemc init zsh)"' >> ~/.zshrc      # or bash / fish
 ```
-
-The core scanning + database layer is pure-stdlib Python; only the interactive CLI and the web
-dashboard need the packages above.
 
 ---
 
-## Usage
-
-### CLI
-
-Run the interactive tool:
+## Quick start
 
 ```bash
-python cli.py
+nemc scan ~/Projects          # scan, classify, check for secrets, save
+nemc status                   # is the project I'm in up to date / changed / leaking a secret?
+nemc projects --language python
+nemc changes ~/Projects       # what changed since the last save (doesn't save)
+nemc reclaim                  # what could be deleted to free space (dry run)
+nemc serve                    # web dashboard on http://127.0.0.1:5000
+nemc                          # the interactive menu
 ```
 
-You **scan a directory first**, then choose its **scope** - the whole directory (a normal project
-scan), or a **hand-picked set of files** (a tree picker, glob patterns, or explicit paths; files can
-come from different subfolders without scanning the parent). A hand-picked set runs a **targeted,
-display-only scan** - MnemoScan secrets plus a size inventory, with nothing written to the database,
-since a loose file set isn't a project. A whole-directory scan then asks how nested projects are
-handled (CLASSIFY / SKIP / MERGE / SPLIT, each with an inline description on highlight and a
-recommended default). The scan (which also flags secrets) is **auto-held in a temporary database**
-until your next scan; you can then **save it
-long-term** - tick which projects to keep, and they're **merged** into the database (it accumulates
-across scans and keeps projects nested inside one another consistent). Once scanned, the rest opens
-up: **explore this scan** (list/search projects,
-latest scan, reclaimable space, cleanup recommendations, dependency overlap, dependency conflicts,
-storage analysis, security findings), **review low-confidence projects** (set the real type / delete /
-"yes to all"), an optional **dependency vulnerability audit** (pip-audit / npm audit), the **Reclaimer**
-(delete selected bloat / build a uni-venv), or **open a saved database**. Launching the CLI also brings
-up the web dashboard in the background (best-effort) so both are usable at once.
+---
 
-### Web dashboard (optional)
+## Commands
 
-```bash
-python utils/web/app.py        # -> http://127.0.0.1:5000
-```
+| Command | What it does |
+|---|---|
+| `nemc` | Interactive menu: scan, explore, review, AI re-classify, audit, Reclaimer, settings |
+| `nemc scan [DIR]` | Scan (incremental), show what changed, save. `--no-save`, `--no-secrets`, `--no-filters`, `--mode`, `--workers` |
+| `nemc rescan [PATH]` | Re-scan every saved folder, or only the one containing PATH |
+| `nemc changes [DIR]` | Scan **without** saving: what changed since the last save |
+| `nemc status [PATH]` | `up to date` / `changed` / `security findings` / not scanned, for the project at PATH |
+| `nemc projects` | List saved projects: `--language`, `--category`, `--framework`, `--under DIR`, `--uncertain` |
+| `nemc secrets [DIR]` | Stored security findings; `--history` scans a repo's entire git history |
+| `nemc audit [DIR]` | Dependency vulnerabilities via `pip-audit` / `npm audit` (if installed) |
+| `nemc reclaim` | Cleanup plan (dry run). `--execute` deletes after you type `DELETE`; `--yes` for scripts. `--kind`, `--min-mb`, `--under` |
+| `nemc serve` | Web dashboard. `-p PORT`, `--host` (see [Security notes](#security-notes)), `--allow-host` |
+| `nemc db` | Database stats; `--path`; `--report [--format md\|json] [-o FILE]` |
+| `nemc init SHELL` | Print the status-light + completion setup for `bash`, `zsh` or `fish` |
 
-Seven views: the **Dashboard** (totals, by-language / by-category, confidence spread, reclaimable
-space), **Projects** (filter + in-page recategorise, now with a per-project git badge), **Cleanup**
-(ranked cleanup suggestions), **Overlap** (shared dependencies + the space a shared/hardlinked package
-store could reclaim + a version-conflict / shareable-venv check), **Storage** (largest projects / files
-/ directories), **Security** (masked secret findings + dependency vulnerabilities + `.env` / ignore
-hygiene), and **Git** (at-risk projects - uncommitted / unpushed / stale - plus repos worth a
-`git gc`). The web dashboard and the advisory
-Cleanup view never delete anything - they only suggest. The one place deletion happens is the opt-in
-**Reclaimer** in the CLI, which shows a full plan and requires a typed confirmation first.
+**Scripting.** Read commands take `--json` (diagnostics go to stderr, so stdout is clean JSON).
+`--fail-on-findings` on `scan` / `changes` / `secrets` / `audit` exits `3` when something is found - handy
+in CI or a git pre-push hook. `nemc status --exit-code` exits `0` up to date, `1` changed, `2` security
+findings, `3` not scanned, `4` unknown. The global `--db PATH` (or `$MNEMOCETUS_DB`) points any command
+at a different database.
+
+Saving a scan also records the folder and time (so `rescan` knows what to refresh) and drops saved
+projects whose folder no longer exists.
+
+---
+
+## Shell integration
+
+One line in your shell config adds the **status light** and **tab-completion**:
+
+| Shell | Add to | Line |
+|---|---|---|
+| bash | `~/.bashrc` | `eval "$(nemc init bash)"` |
+| zsh | `~/.zshrc` | `eval "$(nemc init zsh)"` |
+| fish | `~/.config/fish/config.fish` | `nemc init fish \| source` |
+
+Inside a scanned project your prompt gains a dot: **green** - up to date with the last scan; **amber** -
+new commits or edited / added / deleted files since then; **red** - the project has stored security
+findings; grey - the check ran out of time; nothing - not a scanned project. The check never scans and
+never prints errors: it compares the commit and file timestamps against the last scan and stops at the
+first change (typically ~35 ms, capped at 0.25 s).
+
+Only want one half? `nemc init zsh --no-prompt` (completion only) or `--no-completion` (light only).
+Using a prompt framework (starship, powerlevel10k, oh-my-posh)? Call
+`nemc status --prompt --shell plain` from a custom segment instead.
+
+---
+
+## Web dashboard
+
+`nemc serve` (or Settings -> web dashboard in the menu, which starts it alongside the CLI). Views:
+**Dashboard** (totals, languages, categories, confidence, reclaimable space), **Projects** (filter +
+recategorise, git badges), **Changes** (what changed since the last save), **Cleanup**, **Overlap**
+(shared dependencies + shareable-venv check), **Storage**, **Security** and **Git** (at-risk work, repos
+worth `git gc`), plus Markdown / JSON export. The dashboard never deletes files.
 
 ---
 
 ## Configuration
 
-MnemoCetus runs out of the box; these are the knobs if you want them.
+| What | Where |
+|---|---|
+| Long-term database | `~/.local/share/mnemocetus/mnemocetus.db` (`$XDG_DATA_HOME`), or `$MNEMOCETUS_DB`, or `--db`. A `mnemocetus.db` already in a pre-v1 checkout keeps being used |
+| Temporary session scan (menu) | `$XDG_RUNTIME_DIR/mnemocetus-<uid>/session.db` - private (0700), replaced on each menu scan |
+| Settings | `~/.mnemocetus.json` - web dashboard on/off + port, AI arbiter, scan workers (edit via the menu's **Settings**) |
+| Exclude list | Shipped default in `mnemocetus/exclude_list/default_exclude_list.txt`; your own in `~/.config/mnemocetus/exclude_list.txt` (`$XDG_CONFIG_HOME`) replaces it |
 
-**Exclude lists.** Scans filter out junk directories using the shipped
-`utils/exclude_list/default_exclude_list.txt`. To customise without editing that file, create
-`utils/exclude_list/custom_exclude_list.txt` (one entry per line - a bare name like `node_modules`
-matches anywhere in the tree; an entry containing a slash matches that exact path or anything under
-it). When present, the custom list is used in place of the default. You can also skip filtering
-entirely for a single scan via the "Apply exclude filters?" prompt.
+**Exclude list format:** one entry per line - a bare name like `node_modules` matches anywhere in the
+tree; an entry containing a slash matches that exact path or anything under it.
 
-**Databases.** There are two stores:
+**AI arbiter** (off by default): Settings -> Configure AI arbiter. Pick a provider (Ollama, OpenAI,
+DeepSeek, Groq, OpenRouter, Anthropic, Gemini or any OpenAI-compatible URL) and a model. Only the *name*
+of the environment variable holding your API key is stored, never the key. Cloud endpoints receive
+workspace-relative paths, never absolute ones.
 
-* A **temporary** session database in your system temp directory holds the scan you just ran, and is
-  overwritten on your next scan.
-* The **long-term** database is `mnemocetus.db` in the repo root. "Save this scan long-term" merges the
-  projects you tick into it (accumulating across scans, upserting by path so nothing duplicates);
-  "Open a saved database" (CLI) or `python utils/web/app.py` (web) reads from it.
+**Scan performance:** Settings -> Auto-tune scan performance benchmarks this machine and stores the best
+worker count; `nemc scan --workers N` overrides it for one run.
 
-**Security scanning.** The secret scan runs as part of a scan - toggle it at the "Scan for hard-coded
-secrets?" prompt. Detected secrets are stored **masked**, never the raw value. The dependency
-vulnerability audit is opt-in and shells out to `pip-audit` / `npm audit` only if they're installed,
-doing nothing otherwise.
+---
+
+## Security notes
+
+* Secret values are **masked** before they're stored or shown; MnemoCetus never keeps the raw value.
+* MnemoCetus runs `git` inside every scanned project with repository-controlled hooks and
+  `core.fsmonitor` disabled, so a hostile `.git/config` in a downloaded project can't execute commands.
+* The web dashboard binds to `127.0.0.1` and only answers requests addressed to localhost, rejects
+  cross-site form posts, and never runs the Werkzeug debugger. `nemc serve --host 0.0.0.0` exposes your
+  project paths, git state and masked secret previews to the network **with no login** - it warns, and
+  only accepts the host names it was bound to (add more with `--allow-host`).
+* Dependency names from scanned manifests are validated before reaching `pip install` (uni-venv), so a
+  crafted `requirements.txt` can't inject pip options.
+
+---
+
+## Development
+
+```bash
+pip install -e .
+python -m unittest discover -s mnemocetus/tests     # on the nightly branch
+```
+
+Layout: `mnemocetus/` is the package - `scanner` / `classifier` (discovery + recognition), `cleaner` /
+`reclaimer` (bloat sizing + deletion), `security`, `gitinfo`, `insight` (diffs, at-risk work), `report`,
+`arbiter`, `db/` (SQLite store + analytics), `web/` (Flask), `cli/` (interactive menu), `ops.py` +
+`commands.py` (the `nemc` subcommands) and `shell.py` (prompt + completion).
+
+### Branches
+
+* **`main`** - the stable, public branch. Its interactive menu has no developer debug/checks submenu,
+  and the test suite is not tracked.
+* **`nightly`** - the development branch. It tracks the full test suite under `mnemocetus/tests/`
+  (340+ tests across the scanner, database, web, git, security, CLI and shell layers) and keeps the
+  debug/checks submenu.
 
 ---
 
@@ -181,36 +237,24 @@ doing nothing otherwise.
 * v0.3: Metadata storage system (SQLite) + database viewer (+ the OOP scanner refactor folded in)
 * v0.4: Smarter recognition (weighted confidence, composition breakdown, review/override, web
   dashboard) + reclaimable-space marks, safe cleanup recommendations, and cross-project
-  dependency-overlap analysis (+ the scanner split into classifier / cleaner / cli modules;
-  v0.4.x adds the storage analyser)
+  dependency-overlap analysis (+ the storage analyser)
 * v0.5: Dependency intelligence (version-aware conflict / shareable-venv checks) + the MnemoScan
   security layer (masked secret detection, optional pip-audit / npm audit)
-* v1.0: Full workspace intelligence platform
+* v0.6 - v0.8: UI overhaul and report export, hardening, the opt-in AI arbiter, a parallel scanner
+  with auto-tuning
+* v0.9: The git-aware workspace - git state, incremental scans, git-history secret scan, security
+  hardening, and the "what changed since last save" diff
+* **v1.0: The shell companion** - an installable `mnemocetus` package, the `nemc` command,
+  the shell-prompt status light, tab-completion, and much faster scans on large workspaces
 
-Note: the roadmap numbers are actual release versions. `PLAN.md` uses finer-grained planning
-milestones (its "v0.5" and "v0.6" feature buckets both ship inside release v0.4).
-
----
-
-## Branches
-
-* **`main`** - the stable, public branch. Its interactive CLI is the streamlined
-  scan -> explore -> save flow (no developer debug/checks menu), and the test suite is not tracked.
-* **`nightly`** - the development branch. It tracks the full test suite under `utils/tests/`
-  (`test_suite.py`, `test_db_manager.py`, `test_web.py` - 169 tests across the scanner, database, and
-  web layers) and keeps the CLI's debug/checks submenu, so it's the branch to run the tests and hack on.
-
-Run the tests (on `nightly`) from the repo root with:
-
-```bash
-python -m unittest discover -s utils/tests
-```
+Next ideas: `nemc watch` (re-scan on change), archive-and-reclaim for stale repositories (push to a
+private remote, then remove locally once everything is backed up), and more secret detectors.
 
 ---
 
 ## Goals
 
-MnemoCetus aims to become a developer workspace assistant that:
+MnemoCetus aims to be a developer workspace assistant that:
 
 * Organises projects automatically
 * Reduces storage clutter

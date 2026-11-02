@@ -6,3 +6,6 @@ exclude_list/custom_exclude_list.txt
 *.db
 *.db-wal
 *.db-shm
+build/
+dist/
+*.egg-info/
