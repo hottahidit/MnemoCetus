@@ -5,37 +5,53 @@
 # The recognition engine now lives in classifier.py and the cleanup detection in cleaner.py -> this file is the scanning core plus the Scanner orchestrator.
 
 # IMPORTS
-from utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
+import sys
+from mnemocetus.utils import safe_print
+
+
+def print(*objects, **kwargs):  # noqa: A001 -> every scanner message is a diagnostic
+    """
+    The scanner's messages (exclude-list notice, unreadable files, ...) are diagnostics -> stderr, so a
+    command's stdout stays clean data (e.g. `nemc scan --json | jq`). Markup-safe via safe_print.
+    """
+    kwargs.setdefault("file", sys.stderr)
+    safe_print(*objects, **kwargs)
 import os
 import stat
 
 # The classification engine (Scanner.detect delegates the "what kind of project" work to these).
-from classifier import (
+from mnemocetus.classifier import (
     PYTHON_SIGNALS, JS_SIGNALS, W_MARKER, W_DEP, W_LAYOUT,
     _result, _unknown, _census, _recognise, _load_toml,
     _python_dependencies, _js_dependencies, _go_dependencies,
 )
 
 # FUNCTIONS
-def _load_exclude_list():
+def _load_exclude_list(quiet=False):
     """
     Read the exclude list off disk -> prefer the user's custom_exclude_list.txt, else fall back to the shipped default_exclude_list.txt.
 
     Returns:
         list: the raw lines (Scanner compiles them into rules). This is the only file I/O, and it runs when a Scanner is built, not at import.
     """
-    # Resolve the exclude_list dir relative to THIS file (utils/), not the current working directory,
-    # so the CLI works no matter where it's launched from (e.g. from inside utils/, not just the repo root).
+    # The shipped list lives in the package; a user's own list lives in their config dir (an installed
+    # package's folder isn't somewhere you should be editing). The old in-package custom file still works.
     here = os.path.dirname(os.path.abspath(__file__))
-    custom = os.path.join(here, "exclude_list", "custom_exclude_list.txt")
-    default = os.path.join(here, "exclude_list", "default_exclude_list.txt")
-    try:
-        with open(custom, 'r') as f:
-            return f.read().splitlines()
-    except FileNotFoundError:
-        print("Custom exclude list not found, proceeding without it. (If it exists, name your custom list 'custom_exclude_list.txt' and place it in the 'exclude_list' folder to use it.)")
-        with open(default, 'r') as f:
-            return f.read().splitlines()
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    candidates = (
+        os.path.join(config_home, "mnemocetus", "exclude_list.txt"),
+        os.path.join(here, "exclude_list", "custom_exclude_list.txt"),
+    )
+    for custom in candidates:
+        try:
+            with open(custom, 'r') as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            continue
+    if not quiet:
+        print(f"Using the default exclude list. (To customise it, create {candidates[0]}.)")
+    with open(os.path.join(here, "exclude_list", "default_exclude_list.txt"), 'r') as f:
+        return f.read().splitlines()
 
 def compile_exclude_rules(exclude_list):
     """
@@ -141,7 +157,7 @@ def _directory_metrics(directory, name_rules, path_rules, dependency_count=0, fi
 
 # The byte-size formatter now lives in utils (one shared copy); re-exported here under its long-standing
 # name so `from scanner import _human_size` (cli.py) keeps working.
-from utils import human_size as _human_size
+from mnemocetus.utils import human_size as _human_size
 
 def describe(info):
     """Human-readable one-liner for a classification dict (back-compat string form)."""
@@ -169,13 +185,13 @@ class Scanner:
     Build one (optionally with your own exclude_list); it compiles the exclude rules ONCE and reuses them across every scan. The old module-level functions (scan_directory, classify_directory, ...) still work -> they just delegate to a shared default Scanner.
     """
 
-    def __init__(self, exclude_list=None):
+    def __init__(self, exclude_list=None, quiet=False):
         """
         Args:
             exclude_list (list): folders to ignore. If None we load it from the custom/default exclude_list files -> that's the only file I/O, and it happens here, not at import time.
         """
         if exclude_list is None:
-            exclude_list = _load_exclude_list()
+            exclude_list = _load_exclude_list(quiet=quiet)  # quiet -> nothing printed (e.g. inside a shell prompt)
         self.exclude_list = exclude_list
         # Compile the exclude list once up front rather than re-parsing it on every path.
         self._name_rules, self._path_rules = compile_exclude_rules(exclude_list)
@@ -388,7 +404,10 @@ class Scanner:
             return _result("go", [], category, go_markers, confidence, metrics,
                            dependencies=go_deps, breakdown=breakdown)
 
-        # Fallback: no manifest -> lean entirely on the file-extension census.
+        # Fallback: no manifest -> lean entirely on the file-extension census. ONLY reached when a caller
+        # passes file_paths (detect_directory_type / direct detect calls). Workspace scans go through
+        # classify(), which deliberately doesn't -> a folder needs a manifest to count as a project, so
+        # loose script / notebook folders don't inflate the project list (product decision, 2026-11).
         if file_paths:
             census = _census(file_paths)
             if census:
@@ -589,8 +608,8 @@ def _load_baseline(baseline_db):
     """
     if not baseline_db or not os.path.exists(baseline_db):
         return {}
-    from db_tools import manager as db_manager
-    import gitinfo
+    from mnemocetus.db import manager as db_manager
+    from mnemocetus import gitinfo
     try:
         db = db_manager.Database(baseline_db)
     except Exception:  # noqa: BLE001 -> a missing/corrupt baseline simply disables incremental
@@ -637,11 +656,11 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     Returns:
         (scan_id, project_count): the stored scan's id and how many projects landed.
     """
-    from db_tools import manager as db_manager  # local import -> the DB layer is optional for plain scanning
-    from cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
-    from security import scan_secrets, check_env_exposure, check_ignore_hygiene  # local import -> keep the security layer out of plain scanning
+    from mnemocetus.db import manager as db_manager  # local import -> the DB layer is optional for plain scanning
+    from mnemocetus.cleaner import _collect_marks  # local import -> keep the cleanup layer out of plain scanning
+    from mnemocetus.security import scan_secrets, check_env_exposure, check_ignore_hygiene  # local import -> keep the security layer out of plain scanning
     from concurrent.futures import ThreadPoolExecutor
-    import gitinfo  # local import -> git awareness is optional
+    from mnemocetus import gitinfo  # local import -> git awareness is optional
 
     sc = _default()
     # The classify cache is keyed on a dir's OWN mtime, but its results hold subtree sizes + parsed deps:
@@ -780,12 +799,3 @@ def persist_scan(directory, db_path=None, mode="CLASSIFY", confirm_filters=True,
     finally:
         db.close()
 ## ---------------------------------------------------------------------------------------- ##
-
-# MAIN
-# (run directly -> hand off to the interactive CLI, which lives in cli.py at the repo root now)
-if __name__ == "__main__":
-    import sys
-    # cli.py is one level up from utils/ -> put the repo root on the path so 'import cli' finds it.
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from cli import main
-    main()

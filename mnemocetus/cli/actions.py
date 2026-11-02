@@ -9,17 +9,17 @@ import stat
 
 import questionary
 from rich import box
-from utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
+from mnemocetus.utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
 from rich.panel import Panel
 from rich.table import Table
 from rich.markup import escape
 
-from db_tools import manager as db_manager
-import report
-import gitinfo
-import insight
-from scanner import _human_size
-from cli_tools.ui import _menu, ask_dir, _pause, _qstyle
+from mnemocetus.db import manager as db_manager
+from mnemocetus import report
+from mnemocetus import gitinfo
+from mnemocetus import insight
+from mnemocetus.scanner import _human_size
+from mnemocetus.cli.ui import _menu, ask_dir, _pause, _qstyle
 
 
 def show_changes(changes):
@@ -345,7 +345,7 @@ def do_browse(db_path, baseline_db=None):
                     if questionary.confirm(
                             f"Run `git gc` on these {len(recs['items'])} repo(s) now? (safe - it never touches your commits/branches)",
                             default=False, style=_qstyle).ask():
-                        from reclaimer import run_git_gc
+                        from mnemocetus.reclaimer import run_git_gc
                         res = run_git_gc([it["path"] for it in recs["items"]])
                         msg = (f"Ran git gc on [bold]{len(res['ran'])}[/] repo(s), "
                                f"freed [bold]{_human_size(res['freed_bytes'])}[/].")
@@ -473,7 +473,7 @@ def do_audit():
     directory = ask_dir("Directory to audit (pip-audit / npm audit):")
     if not directory:
         return
-    from security import audit_dependencies  # lazy: the audit shells out to optional external tools
+    from mnemocetus.security import audit_dependencies  # lazy: the audit shells out to optional external tools
     findings = audit_dependencies(directory)
     if not findings:
         print("No vulnerabilities reported (or pip-audit / npm audit isn't installed -> the audit is optional).")
@@ -493,7 +493,7 @@ def do_history_scan():
     if not gitinfo.status(directory).get("is_repo"):
         print("Not a git repository -> the history scan needs one (the plain scan already covers the files).")
         return
-    from security import scan_git_history, HistoryScanError  # lazy: shells out to git, walks every commit
+    from mnemocetus.security import scan_git_history, HistoryScanError  # lazy: shells out to git, walks every commit
     print("[dim]Walking every commit in history -> this can take a moment on a large repo...[/]")
     try:
         findings = scan_git_history(directory)
@@ -531,7 +531,7 @@ def _enumerate_scannable(directory, cap=400):
     FIFOs / devices), but KEEPING hidden files like .env (that's where secrets hide). Returns a sorted
     list of paths relative to 'directory', or None if there are more than 'cap' (too many for a tree).
     """
-    from scanner import _default, _is_excluded
+    from mnemocetus.scanner import _default, _is_excluded
     sc = _default()
     nr, pr = sc._name_rules, sc._path_rules
     files = []
@@ -676,7 +676,7 @@ def do_file_scan(directory, files):
     Targeted scan over a hand-picked set of files -> MnemoScan secrets + a size inventory. On-demand and
     DISPLAY-ONLY: a loose file set isn't a project, so nothing is written to the database.
     """
-    from security import _scan_file, BINARY_EXTS, MAX_FILE_BYTES
+    from mnemocetus.security import _scan_file, BINARY_EXTS, MAX_FILE_BYTES
     findings, total_bytes, scanned = [], 0, 0
     for p in files:
         try:

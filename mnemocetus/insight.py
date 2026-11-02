@@ -136,7 +136,7 @@ def has_changes(d):
 
 def summarise_diff(d):
     """A one-line summary, e.g. '+3 new, -1 removed, 5 changed, 2 grew/shrank, 2 NEW security finding(s)'."""
-    import utils
+    from mnemocetus import utils
     parts = []
     if d["new"]:
         parts.append(f"+{len(d['new'])} new")
@@ -162,7 +162,7 @@ def git_gc_recommendations(db, min_bytes=50 * 1024 * 1024):
     repo -> computed on demand, so scans stay fast). Returns {items, total_reclaimable}, where each item is
     {path, reclaimable, total}. Only repos with an estimate >= min_bytes are listed, biggest first.
     """
-    import gitinfo
+    from mnemocetus import gitinfo
     items = []
     for p in _one_per_repo(db.all_projects()):  # nested projects share ONE .git -> measure (and count) it once
         size = gitinfo.git_dir_size(p["path"])

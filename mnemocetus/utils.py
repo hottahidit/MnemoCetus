@@ -27,13 +27,14 @@ def safe_print(*objects, **kwargs):
         _rich_print(*objects, **kwargs)
     except MarkupError:
         from rich.console import Console
-        Console(markup=False).print(*objects, **{k: v for k, v in kwargs.items() if k in ("sep", "end")})
+        Console(markup=False, file=kwargs.get("file")).print(
+            *objects, **{k: v for k, v in kwargs.items() if k in ("sep", "end")})
 
 
 @contextmanager
 def open_db(db_path):
     """Open a Database and guarantee it is closed afterwards -> `with open_db(path) as db: ...`."""
-    from db_tools import manager as db_manager  # lazy: keeps `import utils` free of the DB layer for callers that only want human_size
+    from mnemocetus.db import manager as db_manager  # lazy: keeps `import utils` free of the DB layer for callers that only want human_size
     db = db_manager.Database(db_path)
     try:
         yield db

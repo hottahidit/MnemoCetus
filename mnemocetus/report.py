@@ -8,8 +8,8 @@ from datetime import datetime
 import json
 import os
 
-import utils
-from utils import human_size as _human_size
+from mnemocetus import utils
+from mnemocetus.utils import human_size as _human_size
 
 
 def _overview(projects):
@@ -46,7 +46,7 @@ def build_report(db_path, baseline_db=None):
     changes = None
     if baseline_db and os.path.exists(baseline_db) and \
             os.path.abspath(baseline_db) != os.path.abspath(db_path):
-        import insight
+        from mnemocetus import insight
         with utils.open_db(db_path) as cur, utils.open_db(baseline_db) as base:
             changes = insight.diff_databases(cur, base)
             changes["baseline"] = baseline_db
@@ -132,7 +132,7 @@ def render_markdown(report):
     # Changes since the baseline (only when the report was built against one).
     ch = report.get("changes")
     if ch is not None:
-        import insight
+        from mnemocetus import insight
         w("## Changes since last save")
         w("")
         w(f"Compared `{ch['root']}` against `{ch['baseline']}`: {insight.summarise_diff(ch)}.")

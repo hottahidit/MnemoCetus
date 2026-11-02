@@ -51,7 +51,7 @@ def autotune(candidates=None, security=True, repeats=2,
     Returns:
         (best_workers, results): results is [(workers, seconds), ...] sorted by worker count.
     """
-    from scanner import persist_scan  # local import -> tuning is optional, keep it off the import path
+    from mnemocetus.scanner import persist_scan  # local import -> tuning is optional, keep it off the import path
 
     cpu = os.cpu_count() or 4
     cands = candidates if candidates else _candidates(cpu)

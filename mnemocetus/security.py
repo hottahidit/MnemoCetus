@@ -10,7 +10,7 @@ import stat
 import shutil
 import subprocess
 
-from scanner import _is_excluded  # reuse the scan's exclusion test so we skip the same junk (and never descend into .git)
+from mnemocetus.scanner import _is_excluded  # reuse the scan's exclusion test so we skip the same junk (and never descend into .git)
 
 # Well-known secret shapes, kept deliberately specific to keep false positives down.
 # Each entry: rule name -> (compiled pattern, severity).
@@ -49,7 +49,7 @@ def check_env_exposure(directory, is_repo):
     """
     if not is_repo:
         return []
-    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    from mnemocetus import gitinfo  # lazy -> keep the git layer off security.py's import path
     findings = []
     for name in ENV_FILENAMES:
         path = os.path.join(directory, name)
@@ -72,7 +72,7 @@ def check_ignore_hygiene(directory, is_repo, marks):
     """
     if not is_repo or not marks:
         return []
-    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    from mnemocetus import gitinfo  # lazy -> keep the git layer off security.py's import path
     findings = []
     unignored = []
     for m in marks:
@@ -188,7 +188,7 @@ def scan_git_history(directory, timeout=300):
     """
     import time
     import tempfile
-    import gitinfo  # lazy -> keep the git layer off security.py's import path
+    from mnemocetus import gitinfo  # lazy -> keep the git layer off security.py's import path
     if not gitinfo.git_available():
         return []
     if gitinfo._git(["rev-parse", "--git-dir"], directory) is None:

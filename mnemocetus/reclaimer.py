@@ -9,7 +9,7 @@ import shutil
 import re
 import subprocess
 
-from cleaner import RECLAIMABLE_MARKERS  # the curated set of dir names we are ever willing to delete
+from mnemocetus.cleaner import RECLAIMABLE_MARKERS  # the curated set of dir names we are ever willing to delete
 
 # Marker names that are ALSO common names for real, hand-written content (a committed dist/ for a GitHub
 # Action, electron-builder's build/ icons, a Maven-less target/ folder ...). These are only treated as
@@ -66,7 +66,7 @@ def _safe_to_delete(path, workspace_root):
     needs = _AMBIGUOUS_MARKERS.get(name)
     if needs and not any(os.path.exists(os.path.join(os.path.dirname(real), f)) for f in needs):
         return False, f"'{name}/' has no build manifest beside it (may be hand-written content)"
-    import gitinfo  # local import -> the git layer stays optional
+    from mnemocetus import gitinfo  # local import -> the git layer stays optional
     if gitinfo.git_available():
         tracked = gitinfo.tracked_files_under(real)
         if tracked:
@@ -159,7 +159,7 @@ def run_git_gc(repo_paths, aggressive=False):
 
     Returns {ran: [path,...], freed_bytes: int, failed: [(path, msg),...]}.
     """
-    from gitinfo import git_dir_size, git_command, git_env  # local import -> git layer stays optional
+    from mnemocetus.gitinfo import git_dir_size, git_command, git_env  # local import -> git layer stays optional
     cmd = git_command(["gc"] + (["--prune=now"] if aggressive else []))
     ran, failed, freed = [], [], 0
     for path in repo_paths:

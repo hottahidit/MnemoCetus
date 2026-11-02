@@ -8,12 +8,33 @@ import json
 import sqlite3
 from contextlib import contextmanager
 
-from db_tools.analytics import AnalyticsMixin
+from mnemocetus.db.analytics import AnalyticsMixin
 
 SCHEMA_VERSION = 8  # NOTE: Remember to bump this value with every new update
-# schema.sql sits next to this file inside db_tools/; the DB lives at the project root (two levels up from db_tools/).
+# schema.sql ships inside the package, next to this file.
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "mnemocetus.db")
+
+
+def _default_db_path():
+    """
+    Where the long-term database lives, first match wins:
+      1. $MNEMOCETUS_DB                                   (explicit override)
+      2. <checkout>/mnemocetus.db, if it already exists  (pre-v1 location -> existing data keeps working)
+      3. $XDG_DATA_HOME/mnemocetus/mnemocetus.db          (default: ~/.local/share/mnemocetus/)
+    The old "next to the code" location can't be the default any more: installed, that is site-packages.
+    """
+    env = os.environ.get("MNEMOCETUS_DB")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    legacy = os.path.join(package_root, "mnemocetus.db")
+    if os.path.exists(legacy):
+        return legacy
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(data_home, "mnemocetus", "mnemocetus.db")
+
+
+DEFAULT_DB_PATH = _default_db_path()
 
 
 def _now():
@@ -65,6 +86,8 @@ class Database(AnalyticsMixin):
         """
         self.db_path = db_path
         self.schema_path = schema_path
+        if db_path != ":memory:" and os.path.dirname(db_path):
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)  # e.g. a first run's ~/.local/share/mnemocetus/
         # timeout -> wait up to 30s for a lock instead of failing at once with "database is locked"
         # (the web dashboard thread reads the same file a scan is writing).
         self.con = sqlite3.connect(db_path, timeout=30)

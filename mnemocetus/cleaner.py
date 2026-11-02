@@ -6,7 +6,7 @@
 import os
 import stat
 
-from scanner import _is_excluded  # reuse the scan's exclusion test, so "excluded but not reclaimable" (e.g. .git) is handled identically
+from mnemocetus.scanner import _is_excluded  # reuse the scan's exclusion test, so "excluded but not reclaimable" (e.g. .git) is handled identically
 
 # Directories the scan filters out but that we still want to SIZE, because they're regenerable: delete them and a tool rebuilds them. 
 # Each entry: dir name -> (kind, how it comes back).

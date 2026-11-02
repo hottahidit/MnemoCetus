@@ -17,21 +17,15 @@
 # post-action redirect only follows same-site paths (no open redirect). See _guard_request below.
 
 import os
-import sys
 
 from flask import Flask, render_template, request, redirect, url_for, Response, abort
 from urllib.parse import urlsplit
 
-# Make the sibling modules (db_manager) importable whether it's run as a script or imported.
-UTILS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if UTILS_DIR not in sys.path:
-    sys.path.insert(0, UTILS_DIR)
-
-from db_tools import manager as db_manager  # noqa: E402
-import report  # noqa: E402
-import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
-import gitinfo  # noqa: E402  (per-project git badge)
-import insight  # noqa: E402  (at-risk projects + git-gc recommendations)
+from mnemocetus.db import manager as db_manager  # noqa: E402
+from mnemocetus import report  # noqa: E402
+from mnemocetus import utils  # noqa: E402  (shared helpers: open_db / human_size / confidence bands)
+from mnemocetus import gitinfo  # noqa: E402  (per-project git badge)
+from mnemocetus import insight  # noqa: E402  (at-risk projects + git-gc recommendations)
 
 # The categories offered in the recategorise dropdown (mirrors the CLI review choices).
 CATEGORIES = ["backend", "frontend", "full stack", "automation", "library", "cli", "desktop", "application", "data/ml", "other"]
@@ -381,6 +375,6 @@ def create_app(db_path=None, baseline_db=None):
 
 
 if __name__ == "__main__":
-    # Dev server: 'python utils/web/app.py' -> http://127.0.0.1:5000
+    # Dev server: 'python -m mnemocetus.web.app' -> http://127.0.0.1:5000
     # Never debug=True -> the Werkzeug debugger is a remote-code-execution console.
     create_app().run(host="127.0.0.1")

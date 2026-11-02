@@ -1,0 +1,684 @@
+# Interactive CLI for MnemoCetus (the interactive questionary menu).
+#
+# The human-facing front-end. Launched by `nemc` with no arguments (or `python -m mnemocetus`, or the
+# repo-root `python cli.py` shim); the engine modules (scanner / classifier / db / ...) are its siblings
+# in the mnemocetus package.
+
+# IMPORTS
+import os
+import sys
+import faulthandler
+
+from mnemocetus.utils import safe_print as print  # markup-safe: a '[' in a path can't crash the CLI
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.markup import escape
+
+from mnemocetus.scanner import persist_scan, _human_size
+
+from mnemocetus.cli.ui import _qstyle, _menu, ask_dir, ask_mode, _pause
+from mnemocetus.cli.actions import do_browse, do_review, do_audit, do_history_scan, ask_scan_scope, do_file_scan
+
+
+def _session_db_path():
+    """
+    Where the temporary session scan lives -> a PRIVATE per-user directory (0700), not a fixed shared
+    /tmp/mnemocetus_session.db that another local user could pre-create (crashing the os.remove on the
+    next scan, or feeding the dashboard their own data).
+    """
+    import tempfile
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    uid = os.getuid() if hasattr(os, "getuid") else os.environ.get("USERNAME", "user")
+    d = os.path.join(base, f"mnemocetus-{uid}")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        st = os.lstat(d)
+        if os.path.islink(d) or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            d = tempfile.mkdtemp(prefix="mnemocetus-")  # someone else owns / planted it -> use a fresh private dir
+        else:
+            os.chmod(d, 0o700)
+    except OSError:
+        d = tempfile.mkdtemp(prefix="mnemocetus-")
+    return os.path.join(d, "session.db")
+
+
+class _Cancelled(Exception):
+    """A prompt was cancelled (questionary returns None on Ctrl-C) -> abort the whole multi-step flow."""
+
+
+def _answered(answer):
+    """Pass a prompt's answer through, or raise _Cancelled if the user hit Ctrl-C (answer is None)."""
+    if answer is None:
+        raise _Cancelled
+    return answer
+
+
+def _cli():
+    """The interactive questionary menu shown when this file is run directly."""
+    import sys
+    import tempfile
+    import questionary
+    from mnemocetus.db import manager as db_manager
+    from mnemocetus import settings
+    from mnemocetus import arbiter
+
+    if not sys.stdin.isatty():
+        print("The interactive CLI needs a real terminal. Run: nemc")
+        return
+
+    # The current scan is held in a TEMPORARY database (overwritten on each new scan) -> "save long-term" copies it to the permanent database.
+    # Every other feature runs against whatever db path is passed in.
+    session = {
+        "db": _session_db_path(),
+        "root": None, "mode": "CLASSIFY", "security": True, "count": 0, "saved": False,
+    }
+    # Runtime state that isn't scan-specific: the loaded user settings and the web dashboard's URL once it's up.
+    rt = {"cfg": settings.load(), "web_url": None}
+
+    def _start_web(db_path, port=5000):
+        """
+        Start the Flask dashboard in a background daemon thread so it's usable alongside the CLI.
+
+        Best-effort: if flask isn't installed or the port is already taken, the CLI just carries on without it.
+        The dashboard is pointed at the CLI's current database, so it mirrors whatever you scan.
+        """
+        try:
+            from mnemocetus.web.app import create_app
+            from werkzeug.serving import run_simple  # serve directly -> avoids Flask's app.run() startup banner
+        except ImportError:
+            print("[dim]Web dashboard not started (flask isn't installed).[/]")
+            return None
+        import threading
+        import logging
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)  # silence the request log + "Running on" banner
+        host = "127.0.0.1"
+        # The long-term DB is the baseline for the dashboard's /changes page (when it's showing a fresh scan).
+        app = create_app(db_path=db_path, baseline_db=os.path.normpath(db_manager.DEFAULT_DB_PATH))
+        def _serve():
+            try:
+                run_simple(host, port, app, use_reloader=False, use_debugger=False, threaded=True)
+            except OSError:
+                pass  # port already in use (e.g. the dashboard is already running) -> skip it, the CLI is unaffected
+        threading.Thread(target=_serve, daemon=True).start()
+        url = f"http://{host}:{port}"
+        print(Panel(
+            f"Web dashboard live at [bold]{url}[/]\n"
+            f"[dim]It mirrors the scan you're working on - refresh the page after each scan.[/]",
+            title="Web + CLI", style="cyan"))
+        return url
+
+    # --- AI arbiter (opt-in; nothing here runs unless the user enabled it) ---- #
+    def _configure_arbiter(cfg):
+        """
+        Interactive setup for the AI arbiter block -> shared by the first-run wizard and Settings.
+
+        Edits a COPY and only commits + saves it when every prompt was answered, so a Ctrl-C part-way
+        leaves the existing settings exactly as they were. Returns True if the setup was completed.
+        """
+        try:
+            ac = _arbiter_prompts(dict(cfg["arbiter"]))
+        except _Cancelled:
+            print("[dim]Arbiter setup cancelled -> settings unchanged.[/]")
+            return False
+        cfg["arbiter"] = ac
+        settings.save(cfg)
+        if not ac["enabled"]:
+            print("AI arbiter is off.")
+            return True
+        test = questionary.confirm("Test the connection now?", default=True, style=_qstyle).ask()
+        if test:
+            ok, msg = arbiter.get_provider(ac).ping()
+            print(Panel(f"{'✅' if ok else '❌'} {escape(str(msg))}", title="Arbiter connection",
+                        style="green" if ok else "red"))
+        return True
+
+    def _arbiter_prompts(ac):
+        """The arbiter questions themselves -> fills and returns 'ac'; raises _Cancelled on any Ctrl-C."""
+        enabled = questionary.confirm(
+            "Enable the AI arbiter? An optional second opinion on low-confidence projects (off by default).",
+            default=ac["enabled"], style=_qstyle).ask()
+        ac["enabled"] = _answered(enabled)
+        if not enabled:
+            return ac
+        provider = _answered(_menu("AI provider:", choices=list(arbiter.PRESETS.keys()) + ["custom"]))
+        ac["provider"] = provider
+        preset = arbiter.PRESETS.get(provider, {})
+        default_base = ac["base_url"] if provider == "custom" else preset.get("base_url", ac["base_url"])
+        ac["base_url"] = _answered(questionary.text("Base URL:", default=default_base, style=_qstyle).ask()) or default_base
+        local = arbiter.is_local(ac["base_url"])
+        # Model: for OpenAI-compatible endpoints try to list what's available; otherwise ask by name.
+        models = None
+        if provider not in ("anthropic", "gemini"):
+            key = os.environ.get(preset.get("api_key_env", "")) if preset.get("api_key_env") else None
+            models = arbiter.list_models(ac["base_url"], key)
+        if models:
+            pick = _answered(_menu("Model:", choices=models + ["(enter manually)"]))
+            if pick == "(enter manually)":
+                ac["model"] = _answered(questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                                         style=_qstyle).ask()) or ac["model"]
+            else:
+                ac["model"] = pick
+        else:
+            ac["model"] = _answered(questionary.text("Model name:", default=ac["model"] or preset.get("model", ""),
+                                                     style=_qstyle).ask()) or ac["model"]
+        if local:
+            ac["api_key_env"] = ""
+        else:
+            print(Panel(
+                "This is a CLOUD endpoint -> project paths are REDACTED to folder names only (e.g. 'SokaOS'), "
+                "never absolute paths. Dependency, marker and language signals are still sent.",
+                title="Privacy", style="yellow"))
+            default_env = ac["api_key_env"] or preset.get("api_key_env", "")
+            ac["api_key_env"] = _answered(questionary.text(
+                "Name of the env var holding the API key:", default=default_env, style=_qstyle).ask()) or default_env
+        ac["run_after_scan"] = bool(_answered(questionary.confirm(
+            "Run the arbiter automatically after a scan (on low-confidence projects, before you review them)?",
+            default=ac["run_after_scan"], style=_qstyle).ask()))
+        return ac
+
+    def _setup_wizard(cfg):
+        """One-time first-run setup (web dashboard + AI arbiter). Records 'configured' so it never repeats."""
+        print(Panel(
+            "Welcome to MnemoCetus 🐳\nA quick one-time setup -> you can change any of this later in Settings.",
+            title="First-run setup", style="cyan"))
+        web = questionary.confirm(
+            "Auto-start the web dashboard alongside the CLI?", default=cfg["web_enabled"], style=_qstyle).ask()
+        if web is None or not _configure_arbiter(cfg):
+            # Cancelled -> don't record 'configured', so the wizard offers itself again next launch.
+            print("[dim]Setup skipped -> it will run again next time (or use Settings).[/]\n")
+            return
+        cfg["web_enabled"] = web
+        cfg["configured"] = True
+        settings.save(cfg)
+        print("[green]Setup complete.[/]\n")
+
+    def _arbitrate(db_path, ask=True):
+        """Run the arbiter over the current scan's low-confidence projects -> {path: suggestion}."""
+        ac = rt["cfg"]["arbiter"]
+        if not ac["enabled"]:
+            print("AI arbiter is off -> turn it on in Settings first.")
+            return {}
+        if not os.path.exists(db_path):
+            print("Nothing to arbitrate -> scan a directory first.")
+            return {}
+        db = db_manager.Database(db_path)
+        try:
+            pending = db.low_confidence_projects()
+        finally:
+            db.close()
+        if not pending:
+            print("No low-confidence projects -> nothing for the arbiter to weigh in on.")
+            return {}
+        if ask and not questionary.confirm(
+                f"Ask the arbiter about {len(pending)} low-confidence project(s)?",
+                default=True, style=_qstyle).ask():
+            return {}
+        from rich.console import Console
+        suggestions = {}
+        try:
+            with Console().status("[cyan]Consulting the arbiter... (Ctrl-C to stop early)[/]", spinner="dots"):
+                for p in pending:
+                    s = arbiter.classify_project(p, ac, workspace_root=session["root"])
+                    if s:
+                        suggestions[p["path"]] = s
+        except KeyboardInterrupt:
+            print("[yellow]Stopped early -> keeping the suggestions received so far.[/]")
+        print(f"Arbiter offered {len(suggestions)} suggestion(s) across {len(pending)} project(s).")
+        return suggestions
+
+    # --- main actions ---------------------------------------------------- #
+    def do_scan():
+        directory = ask_dir("Directory to scan (blank to go back):")
+        if not directory:
+            return
+        if not os.path.isdir(directory):
+            print(f"'{directory}' isn't a directory.")
+            return
+        # Scope: the whole directory (normal project scan) or a hand-picked set of files.
+        scope = ask_scan_scope(directory)
+        if scope is None:  # cancelled / nothing picked -> back to the menu
+            return
+        if scope[0] == "files":  # targeted secret + inventory scan over the picked files (display-only)
+            do_file_scan(directory, scope[1])
+            _pause()
+            return
+        mode = ask_mode()
+        if not mode or mode == "__back__":  # "Back" (or cancel) -> no scan, return to the menu
+            return
+        apply_filters = questionary.confirm("Apply exclude filters (skip node_modules, venv, ...)?", default=True).ask()
+        if apply_filters is None:  # Ctrl-C -> cancel; never fall through to an UNFILTERED scan
+            return
+        secrets = questionary.confirm("Scan for hard-coded secrets?", default=True).ask()
+        if secrets is None:
+            return
+        # Fresh temporary store -> each scan replaces the last, so it's only held until the next scan.
+        for _f in (session["db"], session["db"] + "-wal", session["db"] + "-shm"):  # + WAL side-files
+            if os.path.exists(_f):
+                os.remove(_f)
+        # An existing long-term DB is the baseline -> unchanged projects are reused (incremental) and we
+        # can report what changed since it. The first-ever scan has no baseline (a full scan).
+        baseline_db = permanent_db if os.path.exists(permanent_db) else None
+        from rich.progress import (Progress, SpinnerColumn, TextColumn, BarColumn,
+                                    MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn)
+        # Indeterminate spinner during the walk (total unknown), then a real bar as projects are stored.
+        with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/]"), BarColumn(),
+                      MofNCompleteColumn(), TimeElapsedColumn(), TimeRemainingColumn(),
+                      transient=True) as _prog:
+            _task = _prog.add_task("Scanning workspace...", total=None)
+            def _on_progress(done, total):
+                _prog.update(_task, total=total, completed=done, description="Classifying + storing")
+            _scan_id, count = persist_scan(directory, db_path=session["db"], mode=mode,
+                                           confirm_filters=apply_filters, security=secrets,
+                                           workers=rt["cfg"].get("scan_workers") or None,
+                                           baseline_db=baseline_db, progress=_on_progress)
+        session.update(root=directory, mode=mode, security=secrets, count=count, saved=False)
+        print(Panel(
+            f"Scanned + held in temporary memory: [bold]{count}[/] project(s) under {directory}.\n"
+            f"[dim]This lasts until your next scan. Choose 'Save this scan long-term' to keep it; "
+            f"all the other features now work on this scan.[/]",
+            title="Scan complete", style="green"))
+        # "What changed since your last save" -> the diff against the baseline long-term DB.
+        if baseline_db:
+            from mnemocetus import insight
+            with db_manager.Database(session["db"]) as _cur, db_manager.Database(baseline_db) as _base:
+                _changes = insight.diff_databases(_cur, _base, root=os.path.abspath(directory))
+            body = f"Since your last save: {escape(insight.summarise_diff(_changes))}."
+            if _changes["new_findings"]:
+                # New security findings are the headline -> list the first few right here.
+                body += "\n"
+                for f in _changes["new_findings"][:8]:
+                    loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
+                    body += f"\n  [red]{escape(str(f['severity']))}[/] {escape(str(f['rule']))}  [dim]{escape(loc)}[/]"
+                if len(_changes["new_findings"]) > 8:
+                    body += f"\n  [dim]... and {len(_changes['new_findings']) - 8} more[/]"
+            if insight.has_changes(_changes):
+                body += "\n[dim]Full breakdown: Explore -> 'What changed since last save' (or the web Changes page).[/]"
+            print(Panel(body, title="What changed",
+                        style="red" if _changes["new_findings"] else "cyan"))
+        # Opt-in: weigh in on the uncertain ones with the arbiter, then drop into review, before the user moves on.
+        if rt["cfg"]["arbiter"]["enabled"] and rt["cfg"]["arbiter"]["run_after_scan"]:
+            sug = _arbitrate(session["db"], ask=False)
+            if sug:
+                do_review(session["db"], sug)
+        _pause()
+
+    def do_save_longterm():
+        if session["root"] is None:
+            print("Nothing to save yet -> scan a directory first.")
+            return
+        dest = os.path.normpath(db_manager.DEFAULT_DB_PATH)
+
+        # Let the user CHECK which scanned projects to keep, then MERGE them in -> the long-term
+        # database accumulates across scans (upsert by path), rather than being replaced each time.
+        sdb = db_manager.Database(session["db"])
+        try:
+            projects = sdb.all_projects()
+        finally:
+            sdb.close()
+        if not projects:
+            print("Nothing to save -> this scan has no recognised projects.")
+            return
+        existing = 0
+        if os.path.exists(dest):
+            edb = db_manager.Database(dest)
+            try:
+                existing = len(edb.all_projects())
+            finally:
+                edb.close()
+        choices = [questionary.Choice(f"{p['path']}  [{p['language'] or '?'} / {p['category'] or '?'}]",
+                                      value=p["path"], checked=True) for p in projects]
+        picked = questionary.checkbox(
+            f"Which projects to save long-term? (the database already holds {existing})",
+            choices=choices, style=_qstyle).ask()
+        if not picked:
+            print("Nothing checked -> not saved.")
+            return
+
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        db = db_manager.Database(dest)
+        try:
+            with db.batch():
+                # Record the scan (root + totals) too -> `nemc rescan` / `nemc status` know what was saved, when.
+                with db_manager.Database(session["db"]) as sdb_:
+                    latest = sdb_.latest_scan() or {}
+                scan_id = db.start_scan(os.path.abspath(session["root"]))
+                n = db.merge_from(session["db"], only_paths=set(picked))
+                db.finish_scan(scan_id, project_count=n, file_count=latest.get("file_count") or 0,
+                               total_bytes=latest.get("total_bytes") or 0)
+            total = len(db.all_projects())
+        finally:
+            db.close()
+        session["saved"] = True
+        print(Panel(f"Merged [bold]{n}[/] project(s) into the long-term database.\n"
+                    f"It now holds [bold]{total}[/] project(s) in total.\n[dim]{dest}[/]",
+                    title="Saved long-term", style="green"))
+
+    def do_reclaim():
+        # The one destructive flow: pick bloat to delete + optionally build a uni-venv, confirm, then execute.
+        from mnemocetus.db import manager as db_manager
+        from mnemocetus.reclaimer import execute_reclaim, create_uni_venv, _safe_to_delete
+        db = db_manager.Database(session["db"])
+        try:
+            recs = db.cleanup_recommendations()
+            if not recs["item_count"]:
+                print("Nothing to reclaim -> this scan found no regenerable bloat.")
+                return
+
+            # 1) choose which KINDS of bloat to delete (Ctrl-C here backs out of the Reclaimer entirely).
+            kind_choices = [questionary.Choice(f"{k}  ({v['count']} dir(s), {_human_size(v['bytes'])})", value=k)
+                            for k, v in recs["by_kind"].items()]
+            chosen_kinds = questionary.checkbox(
+                "Select what to DELETE (space toggles, enter confirms, Ctrl-C to go back):",
+                choices=kind_choices, style=_qstyle).ask()
+            if chosen_kinds is None:
+                return
+            targets = [it for it in recs["items"] if it["kind"] in set(chosen_kinds)]
+
+            # 2) optionally build one shared uni-venv.
+            uni = None
+            if questionary.confirm("Also build one shared uni-venv for these projects?", default=False, style=_qstyle).ask():
+                py = [p for p in db.all_projects()
+                      if (p["language"] or "").startswith("python") and p["dependencies"]]
+                if not py:
+                    print("No Python projects with dependencies in this scan -> skipping the uni-venv.")
+                else:
+                    proj_choices = [questionary.Choice(f"{p['path']}  ({len(p['dependencies'])} deps)",
+                                                       value=p["path"], checked=True) for p in py]
+                    chosen = set(questionary.checkbox("Which projects should the uni-venv cover?",
+                                                      choices=proj_choices, style=_qstyle).ask() or [])
+                    picked = [p for p in py if p["path"] in chosen]
+                    if picked:
+                        intel = db.dependency_intel().get("ecosystems", {}).get("python", {})
+                        clashing = []
+                        for c in intel.get("conflicts", []):
+                            versions = {v for v, paths in c["pins"].items() if any(pp in chosen for pp in paths)}
+                            if len(versions) >= 2:
+                                clashing.append(c["name"])
+                        if clashing:
+                            print(Panel(
+                                f"[yellow]Heads up:[/] these packages are pinned to different exact versions across the "
+                                f"chosen projects: [bold]{', '.join(clashing[:6])}[/].\n"
+                                f"A single venv holds one version of each -> the install may fail or be wrong.",
+                                title="Version conflicts", style="yellow"))
+                            if not questionary.confirm("Build the uni-venv anyway?", default=False, style=_qstyle).ask():
+                                picked = []
+                    if picked:
+                        name = questionary.text("uni-venv name:", default=".uni-venv", style=_qstyle).ask() or ".uni-venv"
+                        loc = questionary.path("uni-venv location:", default=session["root"], style=_qstyle).ask() or session["root"]
+                        deps = sorted({d for p in picked for d in p["dependencies"]})
+                        uni = {"path": os.path.normpath(os.path.join(loc, name)),
+                               "deps": deps, "projects": [p["path"] for p in picked]}
+
+            if not targets and not uni:
+                print("Nothing selected -> Reclaimer cancelled.")
+                return
+
+            # 3) pre-flight the safety guard so refusals show in the plan, BEFORE the typed confirmation
+            #    (execute_reclaim re-checks every path again at delete time).
+            refused = []
+            if targets:
+                checked = [(it, _safe_to_delete(it["path"], session["root"])) for it in targets]
+                refused = [(it, why) for it, (ok, why) in checked if not ok]
+                targets = [it for it, (ok, _) in checked if ok]
+                if not targets and not uni:
+                    print(Panel("\n".join(f"[yellow]-[/] {escape(it['path'])}  [dim]{escape(why)}[/]" for it, why in refused),
+                                title="Every selected directory was refused by the safety guard", style="yellow"))
+                    return
+
+            # 4) show the full plan and require a typed confirmation.
+            lines = []
+            if targets:
+                total = sum(it["size_bytes"] for it in targets)
+                lines.append(f"[bold]Delete {len(targets)} director(y/ies)[/], freeing ~[bold]{_human_size(total)}[/]:")
+                lines += [f"  [red]-[/] {escape(it['path'])}  [dim]({_human_size(it['size_bytes'])})[/]" for it in targets[:20]]
+                if len(targets) > 20:
+                    lines.append(f"  [dim]... and {len(targets) - 20} more[/]")
+            if refused:
+                lines.append(f"\n[yellow]Kept {len(refused)} director(y/ies)[/] the safety guard refused:")
+                lines += [f"  [yellow]-[/] {escape(it['path'])}  [dim]{escape(why)}[/]" for it, why in refused[:20]]
+                if len(refused) > 20:
+                    lines.append(f"  [dim]... and {len(refused) - 20} more[/]")
+            if uni:
+                lines.append(f"\n[bold]Create uni-venv[/] at {uni['path']}")
+                lines.append(f"  covering {len(uni['projects'])} project(s), installing {len(uni['deps'])} package(s)")
+            print(Panel("\n".join(lines), title="Reclaimer plan", style="yellow"))
+            print("[bold red]The directories above will be permanently deleted.[/]")
+            if questionary.text("Type DELETE to proceed (anything else cancels):", style=_qstyle).ask() != "DELETE":
+                print("Cancelled -> nothing was changed.")
+                return
+
+            # 5) execute.
+            if targets:
+                r = execute_reclaim(targets, session["root"])
+                summary = f"Deleted [bold]{len(r['deleted'])}[/] dir(s), freed [bold]{_human_size(r['freed_bytes'])}[/]."
+                if r["skipped"]:
+                    summary += f"\n[yellow]Skipped {len(r['skipped'])}[/] (refused by the safety guard / already gone):"
+                    for p, why in r["skipped"]:
+                        summary += f"\n  [yellow]-[/] {escape(p)}  [dim]{escape(why)}[/]"
+                print(Panel(summary, title="Reclaimed", style="green"))
+                for p, msg in r["errors"]:
+                    print(f"  [red]error[/] {p}: {msg}")
+            if uni:
+                print(f"[dim]Building uni-venv (installing {len(uni['deps'])} packages, this can take a while)...[/]")
+                v = create_uni_venv(uni["path"], uni["deps"])
+                if not v["created"]:
+                    print(Panel(f"[red]Could not create the venv:[/] {v['error']}", title="uni-venv failed", style="red"))
+                elif v["failed"] and v["installed"]:
+                    print(Panel(f"uni-venv ready at [bold]{v['path']}[/] with [bold]{v['installed']}[/] package(s).\n"
+                                f"[dim]{escape(v['error'] or '')}[/]", title="uni-venv created (some skipped)", style="yellow"))
+                elif v["failed"]:
+                    print(Panel(f"venv created at [bold]{v['path']}[/], but the install didn't finish.\n[dim]{v['error']}[/]",
+                                title="uni-venv (deps not installed)", style="yellow"))
+                else:
+                    print(Panel(f"uni-venv ready at [bold]{v['path']}[/] with [bold]{v['installed']}[/] package(s).\n"
+                                f"[dim]Point your projects/editor at this interpreter to share it.[/]",
+                                title="uni-venv created", style="green"))
+        finally:
+            db.close()
+
+    permanent_db = os.path.normpath(db_manager.DEFAULT_DB_PATH)
+
+    # First-run setup wizard -> runs once, then records 'configured' so it never nags again.
+    if not rt["cfg"].get("configured"):
+        _setup_wizard(rt["cfg"])
+
+    # The web dashboard is opt-in (Settings) -> only auto-start it when the user has turned it on.
+    if rt["cfg"]["web_enabled"]:
+        rt["web_url"] = _start_web(session["db"], rt["cfg"]["web_port"])
+
+    def _header():
+        """A live status bar drawn above the menu -> what's scanned, saved-state, and the web link."""
+        if session["root"] is None:
+            state = "[dim]no scan yet - start by scanning a directory[/]"
+        else:
+            saved = "[green]saved ✓[/]" if session["saved"] else "[yellow]unsaved[/]"
+            state = f"[green]{session['count']} project(s)[/] from [cyan]{session['root']}[/] [dim]·[/] {saved}"
+        web = f"[green]web ▲[/] {rt['web_url']}" if rt["web_url"] else "[dim]web off[/]"
+        print(Rule(f"[bold cyan]🐳 MnemoCetus[/]   [dim]│[/]   {state}   [dim]│[/]   {web}",
+                   style="cyan", align="left"))
+
+    def _autotune():
+        """Benchmark a throwaway workspace across worker counts and save the fastest for this machine."""
+        from mnemocetus import tuning
+        from rich.table import Table
+        from rich import box
+        from rich.progress import (Progress, SpinnerColumn, TextColumn, BarColumn,
+                                    MofNCompleteColumn, TimeElapsedColumn)
+        if not questionary.confirm(
+                "Build a small test workspace and time a few scans to find this machine's best worker "
+                "count? (~15-40s; nothing is kept)", default=True, style=_qstyle).ask():
+            return
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Auto-tuning scan workers[/]"), BarColumn(),
+                      MofNCompleteColumn(), TimeElapsedColumn(), transient=True) as prog:
+            task = prog.add_task("tuning", total=None)
+            best, results = tuning.autotune(
+                progress=lambda done, total: prog.update(task, total=total, completed=done))
+        table = Table(title="Auto-tune results", box=box.ROUNDED, header_style="bold cyan")
+        table.add_column("workers")
+        table.add_column("time (s)")
+        for w, sec in results:
+            table.add_row(f"{w}  ⭐" if w == best else str(w), f"{sec:.3f}")
+        print(table)
+        rt["cfg"]["scan_workers"] = best
+        settings.save(rt["cfg"])
+        print(Panel(f"Saved -> scans on this machine will use [bold]{best}[/] worker(s).\n"
+                    f"[dim]Reset to automatic by re-tuning or editing ~/.mnemocetus.json (scan_workers: 0).[/]",
+                    title="Auto-tune complete", style="green"))
+
+    def do_settings():
+        """Toggle global preferences -> web dashboard, AI arbiter, and scan auto-tuning. Persisted to ~/.mnemocetus.json."""
+        cfg = rt["cfg"]
+        while True:
+            action = _menu(
+                f"Settings  (web: {'ON' if cfg['web_enabled'] else 'off'} · "
+                f"AI arbiter: {'ON' if cfg['arbiter']['enabled'] else 'off'} · "
+                f"scan workers: {cfg['scan_workers'] or 'auto'}):",
+                choices=[
+                    "Turn web dashboard OFF" if cfg["web_enabled"] else "Turn web dashboard ON",
+                    "Set web port",
+                    "Configure AI arbiter",
+                    "Auto-tune scan performance",
+                    "↩ Back",
+                ],
+            )
+            if action in (None, "↩ Back"):
+                return
+            if action.startswith("Turn web"):
+                cfg["web_enabled"] = not cfg["web_enabled"]
+                settings.save(cfg)
+                if cfg["web_enabled"]:
+                    if not rt["web_url"]:
+                        rt["web_url"] = _start_web(session["db"], cfg["web_port"])
+                    else:
+                        print(f"Web dashboard already running at {rt['web_url']}.")
+                else:
+                    print("Web dashboard disabled -> it won't auto-start next launch (a running server stops when you quit).")
+            elif action == "Set web port":
+                raw = questionary.text("Web port:", default=str(cfg["web_port"]), style=_qstyle).ask()
+                try:
+                    cfg["web_port"] = int(raw)
+                    settings.save(cfg)
+                    print(f"Port set to {cfg['web_port']} (applies the next time the web starts).")
+                except (TypeError, ValueError):
+                    print("Not a number -> port unchanged.")
+            elif action == "Configure AI arbiter":
+                _configure_arbiter(cfg)
+            elif action == "Auto-tune scan performance":
+                _autotune()
+
+    # Step 1 gates everything: you scan first, which auto-holds the result in temporary memory; only then do the analysis features open up (running against that scan until you save it long-term).
+    while True:
+        # Ctrl-C anywhere inside an action (a long scan, the arbiter loop, a prompt questionary didn't
+        # catch) backs out to this menu instead of killing the whole app.
+        try:
+            _header()
+            if session["root"] is None:
+                action = _menu(
+                    "Start here:",
+                    choices=["Scan a directory", "Open a saved database", "Settings", "Quit"],
+                )
+                if action in (None, "Quit"):
+                    print("Bye! 🐳")
+                    return
+                if action == "Scan a directory":
+                    do_scan()
+                elif action == "Open a saved database":
+                    do_browse(permanent_db)
+                elif action == "Settings":
+                    do_settings()
+                continue
+
+            save_label = "Re-save this scan long-term" if session["saved"] else "Save this scan long-term"
+            action = _menu(
+                "Pick an action:",
+                choices=[
+                    "Explore this scan (browse / search / analyse)",
+                    save_label,
+                    "Review low-confidence projects",
+                    "AI: re-classify uncertain projects",
+                    "Dependency vulnerability audit (optional)",
+                    "Git history secret scan (optional)",
+                    "Reclaimer (delete bloat / build a uni-venv)",
+                    "Scan a different directory",
+                    "Open a saved database",
+                    "Settings",
+                    "Quit",
+                ],
+            )
+            if action in (None, "Quit"):
+                print("Bye! 🐳")
+                return
+            if action.startswith("Explore"):
+                do_browse(session["db"], baseline_db=permanent_db)
+            elif action.endswith("long-term"):
+                do_save_longterm()
+                _pause()
+            elif action == "Review low-confidence projects":
+                do_review(session["db"])
+                _pause()
+            elif action.startswith("AI:"):
+                sug = _arbitrate(session["db"])
+                if sug:
+                    do_review(session["db"], sug)
+                _pause()
+            elif action == "Dependency vulnerability audit (optional)":
+                do_audit()
+                _pause()
+            elif action == "Git history secret scan (optional)":
+                do_history_scan()
+                _pause()
+            elif action.startswith("Reclaimer"):
+                do_reclaim()
+                _pause()
+            elif action == "Scan a different directory":
+                do_scan()
+            elif action == "Open a saved database":
+                do_browse(permanent_db)
+            elif action == "Settings":
+                do_settings()
+
+        except KeyboardInterrupt:
+            print("\n[yellow]Interrupted -> back to the menu.[/]")
+
+#👇  Show this in raw format so "\" will print.                          Do you like the ASCII?
+BANNER = r"""
+                                                                            __________...----..____..-'``-..___
+                                                                          ,'.                                  ```--.._
+                                                                         :                                             ``._
+                                                                        |                           --                    ``.
+                                                                        |                <o>   -.-      -.     -   -.        `.
+                                                                        : .                   __           --            .     \
+                                                                        `._____________     (  `.   -.-      --  -   .   `      \
+                                                                          `-----------------\   \_.--------..__..--.._ `. `.    :
+ooo        ooooo                                                     .oooooo.                \. /                     `-._ .    |
+`88.       .888'                                                    d8P'  `Y8b              .o8                           `.`   |
+ 888b     d'888  ooo. .oo.    .ooooo.  ooo. .oo.  .oo.    .ooooo.  888           .ooooo.  .o888oo oooo  oooo   .oooo.o      \`  |
+ 8 Y88. .P  888  `888P"Y88b  d88' `88b `888P"Y88bP"Y88b  d88' `88b 888          d88' `88b   888   `888  `888  d88(  "8       \  |
+ 8  `888'   888   888   888  888ooo888  888   888   888  888   888 888          888ooo888   888    888   888  `"Y88b.        /  \`
+ 8    Y     888   888   888  888    .o  888   888   888  888   888 `88b    ooo  888    .o   888 .  888   888  o.  )88b      /   .\
+o8o        o888o o888o o888o `Y8bod8P' o888o o888o o888o `Y8bod8P'  `Y8bood8P'  `Y8bod8P'   "888"  `V88V"V8P' 8""888P'     /  __ .\
+                                                                                                                          /_,'  \__\
+"""
+
+def main():
+    """Show the banner, then run the interactive menu (what `nemc` with no arguments opens)."""
+    # Dump a Python traceback (per thread) if the interpreter ever hits a fatal signal (e.g. a segfault in a
+    # C extension) -> turns an opaque "segmentation fault (core dumped)" into a pinpointed stack.
+    faulthandler.enable()
+    from mnemocetus import __version__
+    print(Panel(
+        f"[bright_cyan]{BANNER}[/]",
+        title=f"[bold bright_cyan]MnemoCetus[/] [dim]v{__version__}[/]",
+        subtitle="[italic dim]scan · analyse · clean · secure[/]",
+        border_style="bright_cyan",
+        style="cyan",
+    ))
+    _cli()
+
+
+# MAIN
+# (run directly, usually for testing)
+if __name__ == "__main__":
+    main()

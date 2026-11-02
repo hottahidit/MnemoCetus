@@ -7,3 +7,6 @@ tests/
 *.db
 *.db-wal
 *.db-shm
+build/
+dist/
+*.egg-info/
